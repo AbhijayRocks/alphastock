@@ -1,0 +1,9 @@
+# Auth / accounts — never commit secrets or the local database
+.auth_secret
+*.db
+*.sqlite3
+
+# Python
+__pycache__/
+*.pyc
+.env

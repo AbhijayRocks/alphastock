@@ -1,0 +1,96 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    --line-faint: #1F2533;
+    --line-muted: #262E40;
+    --line-strong: #384358;
+  }
+  html, body, #root { height: 100%; background-color: #0A0B0F; color: #F1F5F9; }
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    font-feature-settings: 'cv11', 'ss01';
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  * { border-color: var(--line-muted); }
+  .num, table, .stat, .price, .pct, td, th, time, code, kbd {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1, 'cv11' 1;
+  }
+  ::selection { background: rgba(244, 196, 93, 0.35); color: #F1F5F9; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #262E40; border-radius: 999px; border: 2px solid #0A0B0F; }
+  ::-webkit-scrollbar-thumb:hover { background: #384358; }
+  :focus { outline: none; }
+  :focus-visible { outline: 2px solid #818CF8; outline-offset: 2px; border-radius: 8px; }
+}
+
+@layer components {
+  .surface { @apply bg-bg-1 border border-line-faint rounded-xl shadow-soft; }
+  .surface-elev { @apply bg-bg-2 border border-line-muted rounded-xl shadow-elev; }
+  .surface-flat { @apply bg-bg-1 border border-line-faint rounded-lg; }
+  .pill { @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-2xs font-medium tracking-wider uppercase; }
+  .eyebrow { @apply text-2xs font-medium tracking-[0.14em] uppercase text-ink-4; }
+  .kbd { @apply inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-md text-2xs font-medium bg-bg-2 border border-line-muted text-ink-3 shadow-soft; }
+  .skeleton { @apply relative overflow-hidden bg-bg-2 rounded-md; }
+  .skeleton::after {
+    content: ''; position: absolute; inset: 0;
+    background: linear-gradient(90deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.05) 50%, rgba(255,255,255,0) 100%);
+    background-size: 200% 100%; animation: shimmer 1.6s linear infinite;
+  }
+  .hairline { background: linear-gradient(90deg, transparent, var(--line-muted), transparent); height: 1px; }
+  .hairline-v { background: linear-gradient(180deg, transparent, var(--line-muted), transparent); width: 1px; }
+  .live-dot { @apply relative inline-block w-1.5 h-1.5 rounded-full bg-bull; }
+  .live-dot::after {
+    content: ''; position: absolute; inset: -3px; border-radius: 999px;
+    border: 1.5px solid rgba(16,185,129,0.5); animation: ringPulse 1.8s ease-out infinite;
+  }
+}
+
+@layer utilities {
+  .bg-dotgrid {
+    background-image: radial-gradient(rgba(255,255,255,0.04) 1px, transparent 1px);
+    background-size: 22px 22px;
+  }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { scrollbar-width: none; }
+  .tabular { font-variant-numeric: tabular-nums; }
+  .text-alpha-gradient {
+    background: linear-gradient(135deg, #FFD478 0%, #F4C45D 50%, #B68A2C 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .text-ink-gradient {
+    background: linear-gradient(180deg, #F1F5F9 0%, #94A3B8 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
+}
+
+/* Recharts tooltip refinement */
+.recharts-default-tooltip {
+  background: #171B25 !important;
+  border: 1px solid #262E40 !important;
+  border-radius: 10px !important;
+  box-shadow: 0 20px 48px -16px rgba(0,0,0,0.65) !important;
+  padding: 10px 12px !important;
+}
+.recharts-tooltip-label {
+  color: #94A3B8 !important; font-size: 11px !important; font-weight: 500 !important;
+  letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 6px !important;
+}
+.recharts-cartesian-axis-tick-value { fill: #64748B !important; font-size: 11px !important; }
+.recharts-cartesian-grid-horizontal line, .recharts-cartesian-grid-vertical line {
+  stroke: #1F2533 !important; stroke-dasharray: 2 4;
+}
