@@ -37,6 +37,7 @@ redis>=5.0.1
 # JWT (HS256) are implemented with the Python standard library — no bcrypt or
 # PyJWT C-extensions to build, so it installs cleanly on every platform.
 SQLAlchemy>=2.0.0
+psycopg2-binary>=2.9.0
 
 # ── Model Storage ─────────────────────────────────────────────────────────────
 huggingface-hub>=0.20.0
