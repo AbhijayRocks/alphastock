@@ -215,5 +215,5 @@ Released under the [MIT License](LICENSE).
 ---
 
 <p align="center">
-  Built by <strong>Abhijay Pansari</strong> · ⭐ star the repo if it's useful.
+  Built by <strong>Abhijay Pansari</strong> , <strong>Gagan C</strong> , <strong>Abhishek Singh</strong> · ⭐ star the repo if it's useful.
 </p>
