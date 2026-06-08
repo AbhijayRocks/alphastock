@@ -88,6 +88,78 @@ export const mockPulse = (horizon = '5d') => {
   };
 };
 
+// ── /api/screen ───────────────────────────────────────────────────────────────
+export const mockScreen = (horizon = '5d') => {
+  const funds = mockFundamentals().fundamentals;
+  const regime = mockRegime().regime;
+  const r4 = (x) => Math.round(x * 1e4) / 1e4;
+  const rows = UNIVERSE.map((m, i) => {
+    const stem = _stem(m.ticker);
+    const r = (salt) => _fhash(m.ticker + horizon + salt);
+    const prob = 0.5 + (r('p') - 0.5) * 0.3;            // ~0.35..0.65
+    const dist = Math.abs(prob - 0.5);
+    const strength = dist >= 0.15 ? 'strong' : dist >= 0.08 ? 'moderate' : 'weak';
+    return {
+      ticker: stem,
+      company_name: m.name,
+      sector: m.sector,
+      current_price: r4(200 + r('px') * 3500),
+      pct_change: r4((r('chg') - 0.5) * 6),
+      direction: prob > 0.5 ? 'UP' : 'DOWN',
+      probability: r4(prob),
+      predicted_return: r4((r('pr') - 0.5) * 0.08),
+      signal_strength: strength,
+      technicals: {
+        rsi_14: Math.round(25 + r('rsi') * 55),
+        macd_hist: r4((r('macd') - 0.5) * 10),
+        vs_sma_50: r4((r('s50') - 0.5) * 0.4),
+        vs_sma_200: r4((r('s200') - 0.5) * 0.5),
+        from_52w_high: r4(-(r('hi') * 0.3)),
+        from_52w_low: r4(r('lo') * 0.8),
+        ret_5d: r4((r('r5') - 0.5) * 0.08),
+        ret_20d: r4((r('r20') - 0.5) * 0.2),
+        ret_60d: r4((r('r60') - 0.5) * 0.4),
+        rvol: r4(0.5 + r('rv') * 1.5),
+        garch_vol: r4(0.15 + r('gv') * 0.5),
+      },
+      fundamentals: funds[stem] || null,
+      signal: i < 6
+        ? { side: 'LONG', rank: i + 1, confidence: r4(0.4 + r('c') * 0.4) }
+        : i >= UNIVERSE.length - 6
+          ? { side: 'SHORT', rank: UNIVERSE.length - i, confidence: r4(0.4 + r('c') * 0.4) }
+          : null,
+      regime,
+    };
+  });
+  return { horizon, count: rows.length, rows };
+};
+
+// ── /api/fundamentals ───────────────────────────────────────────────────────--
+const _fhash = (s) => { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967295; };
+const _stem = (t) => String(t).replace('.NS', '_NS').replace('&', '_').replace('-', '_');
+
+export const mockFundamentals = () => {
+  const fundamentals = {};
+  for (const m of UNIVERSE) {
+    const r = (salt) => _fhash(m.ticker + salt);
+    const mcap = Math.round((m.weight || 1) * 90000 + r('mc') * 60000); // ₹ crore
+    fundamentals[_stem(m.ticker)] = {
+      market_cap_cr: mcap,
+      pe: Math.round((12 + r('pe') * 28) * 100) / 100,
+      forward_pe: Math.round((10 + r('fpe') * 24) * 100) / 100,
+      pb: Math.round((1 + r('pb') * 7) * 100) / 100,
+      roe: Math.round((8 + r('roe') * 24) * 100) / 100,
+      roa: Math.round((3 + r('roa') * 14) * 100) / 100,
+      de: Math.round(r('de') * 1.4 * 100) / 100,
+      revenue_growth: Math.round((-4 + r('rg') * 28) * 100) / 100,
+      earnings_growth: Math.round((-8 + r('eg') * 38) * 100) / 100,
+      dividend_yield: Math.round(r('dy') * 3 * 100) / 100,
+      beta: Math.round((0.4 + r('b') * 1.2) * 100) / 100,
+    };
+  }
+  return { fundamentals };
+};
+
 // ── /api/models ───────────────────────────────────────────────────────────────
 export const mockModels = () => ({
   total_stocks: UNIVERSE.length,

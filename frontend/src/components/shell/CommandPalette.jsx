@@ -18,6 +18,19 @@ const NAV_ITEMS = [
   { id: 'nav-settings',  label: 'Settings',  path: '/settings',  icon: IconSettings,  group: 'Navigate' },
 ];
 
+// Built once at module load — the searchable set is static, so there's no reason
+// to rebuild 50 ticker objects on every keystroke.
+const TICKER_ITEMS = UNIVERSE.map((u) => ({
+  id: `t-${u.ticker}`,
+  label: tickerSymbol(u.ticker),
+  sub: u.name,
+  meta: u.sector,
+  ticker: u.ticker,
+  type: 'ticker',
+  group: 'Tickers',
+}));
+const ALL_ITEMS = [...NAV_ITEMS, ...TICKER_ITEMS];
+
 export const CommandPalette = () => {
   const { paletteOpen, setPaletteOpen, toggleWatchlist, isWatched } = useApp();
   const [q, setQ] = useState('');
@@ -30,18 +43,8 @@ export const CommandPalette = () => {
 
   const items = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    const tickers = UNIVERSE.map((u) => ({
-      id: `t-${u.ticker}`,
-      label: tickerSymbol(u.ticker),
-      sub: u.name,
-      meta: u.sector,
-      ticker: u.ticker,
-      type: 'ticker',
-      group: 'Tickers',
-    }));
-    const all = [...NAV_ITEMS, ...tickers];
-    if (!needle) return all.slice(0, 24);
-    return all
+    if (!needle) return ALL_ITEMS.slice(0, 24);
+    return ALL_ITEMS
       .map((it) => {
         const hay = `${it.label} ${it.sub || ''} ${it.meta || ''}`.toLowerCase();
         const score = hay.includes(needle) ? (it.label.toLowerCase().startsWith(needle) ? 2 : 1) : 0;
@@ -89,7 +92,11 @@ export const CommandPalette = () => {
           transition={{ duration: 0.18 }}
           onMouseDown={(e) => { if (e.target === e.currentTarget) setPaletteOpen(false); }}
         >
-          <div className="absolute inset-0 bg-bg-0/70 backdrop-blur-sm" />
+          {/* Opaque scrim — no backdrop-blur and fully covers the page so the
+              browser can skip compositing the animated dashboard (ticker tape,
+              charts) behind it. The translucent + blurred scrim was the typing
+              lag: it forced a full-viewport recomposite on every frame. */}
+          <div className="absolute inset-0 bg-bg-0" />
           <motion.div
             initial={{ opacity: 0, y: 12, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -98,8 +105,8 @@ export const CommandPalette = () => {
             className="relative w-full max-w-2xl surface-elev shadow-pop overflow-hidden"
             role="dialog" aria-label="Command palette"
           >
-            <div className="flex items-center gap-3 h-12 px-4 border-b border-line-muted">
-              <IconSearch className="w-4 h-4 text-ink-4" />
+            <div className="relative flex items-center gap-3 h-12 px-4 border-b border-line-muted focus-within:border-iris/40 transition-colors group/search">
+              <IconSearch className="w-4 h-4 text-ink-4 transition-colors group-focus-within/search:text-iris" />
               <input
                 ref={inputRef}
                 value={q}
@@ -109,6 +116,15 @@ export const CommandPalette = () => {
                 className="flex-1 bg-transparent text-sm text-ink-1 placeholder:text-ink-4 outline-none"
               />
               <span className="kbd">esc</span>
+              {/* Iris glow accent on focus — mirrors the glowing search bar, but cheap */}
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute left-0 bottom-[-1px] h-px w-full bg-gradient-to-r from-transparent via-iris to-transparent opacity-0 transition-opacity duration-500 group-focus-within/search:opacity-100"
+              />
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute left-1/4 right-1/4 bottom-[-6px] h-[6px] rounded-full bg-iris/40 blur-md opacity-0 transition-opacity duration-500 group-focus-within/search:opacity-100"
+              />
             </div>
 
             <div ref={listRef} className="max-h-[58vh] overflow-y-auto py-2">

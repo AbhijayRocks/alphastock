@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useApi } from '../../hooks/useApi.js';
+import { useApp } from '../../context/AppContext.jsx';
 import { api } from '../../api/client.js';
 import { UNIVERSE, META_BY_TICKER } from '../../data/universe.js';
 import { Sparkline } from '../charts/Sparkline.jsx';
@@ -17,6 +18,7 @@ const miniSeries = (display) => {
 
 export const TickerTape = () => {
   const { data, loading } = useApi(() => api.prices(), []);
+  const { paletteOpen } = useApp();
   const navigate = useNavigate();
 
   const rows = useMemo(() => {
@@ -39,7 +41,10 @@ export const TickerTape = () => {
     <div className="h-9 border-b border-line-faint bg-bg-1/60 overflow-hidden relative group">
       <div className="absolute inset-0 pointer-events-none z-10"
         style={{ background: 'linear-gradient(90deg, #0A0B0F 0%, transparent 6%, transparent 94%, #0A0B0F 100%)' }} />
-      <div className="flex items-center h-full whitespace-nowrap animate-tickerScroll group-hover:[animation-play-state:paused]">
+      <div className={cn(
+        'flex items-center h-full whitespace-nowrap animate-tickerScroll group-hover:[animation-play-state:paused]',
+        paletteOpen && '[animation-play-state:paused]',
+      )}>
         {doubled.map((r, i) => {
           const pos = r.pct >= 0;
           return (

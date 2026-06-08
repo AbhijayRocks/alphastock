@@ -250,6 +250,66 @@ class PulseResponse(BaseModel):
     stance: str                   # desk stance implied by the regime
 
 
+class FundamentalInfo(BaseModel):
+    market_cap_cr: Optional[float] = None   # market capitalisation in ₹ crore
+    pe: Optional[float] = None              # trailing P/E
+    forward_pe: Optional[float] = None
+    pb: Optional[float] = None              # price / book
+    roe: Optional[float] = None             # return on equity, %
+    roa: Optional[float] = None             # return on assets, %
+    de: Optional[float] = None              # debt / equity, ratio
+    revenue_growth: Optional[float] = None  # %
+    earnings_growth: Optional[float] = None # %
+    dividend_yield: Optional[float] = None  # %
+    beta: Optional[float] = None
+
+
+class FundamentalsResponse(BaseModel):
+    fundamentals: Dict[str, FundamentalInfo]
+
+
+class ScreenTechnicals(BaseModel):
+    rsi_14: Optional[float] = None
+    macd_hist: Optional[float] = None
+    vs_sma_50: Optional[float] = None        # (close-SMA50)/SMA50; >0 = above
+    vs_sma_200: Optional[float] = None
+    from_52w_high: Optional[float] = None    # <0 = below the high
+    from_52w_low: Optional[float] = None
+    ret_5d: Optional[float] = None
+    ret_20d: Optional[float] = None
+    ret_60d: Optional[float] = None
+    rvol: Optional[float] = None             # volume vs 20-day average
+    garch_vol: Optional[float] = None
+
+
+class ScreenSignal(BaseModel):
+    side: str                                # LONG | SHORT
+    rank: Optional[int] = None
+    confidence: Optional[float] = None       # meta-label confidence (0..1)
+
+
+class ScreenRow(BaseModel):
+    ticker: str
+    company_name: Optional[str] = None
+    sector: Optional[str] = None
+    current_price: Optional[float] = None
+    pct_change: Optional[float] = None       # today's % move
+    direction: str
+    probability: float
+    predicted_return: Optional[float] = None
+    signal_strength: str
+    technicals: ScreenTechnicals
+    fundamentals: Optional[FundamentalInfo] = None
+    signal: Optional[ScreenSignal] = None
+    regime: str
+
+
+class ScreenResponse(BaseModel):
+    horizon: str
+    count: int
+    rows: List[ScreenRow]
+
+
 class NewsItem(BaseModel):
     headline: str
     link: str

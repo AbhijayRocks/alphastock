@@ -6,7 +6,7 @@ import axios from 'axios';
 import {
   mockHealth, mockRegime, mockModels, mockPrices, mockHistory,
   mockPredict, mockExplain, mockBacktest, mockOptimize, mockSimulate, mockSignals,
-  mockNews, mockNewsSectors, mockPulse,
+  mockNews, mockNewsSectors, mockPulse, mockFundamentals, mockScreen,
 } from '../data/mock.js';
 
 const STORAGE_KEY = 'alphastock.config.v1';
@@ -54,6 +54,8 @@ const mock = {
   '/simulate':          (body) => mockSimulate(body),
   '/signals':           ({ horizon }) => mockSignals(horizon),
   '/pulse':             ({ horizon }) => mockPulse(horizon),
+  '/screen':            ({ horizon }) => mockScreen(horizon),
+  '/fundamentals':      () => mockFundamentals(),
   '/news':              ({ sector }) => mockNews(sector),
   '/news/sectors':      () => mockNewsSectors(),
 };
@@ -127,6 +129,10 @@ export const api = {
   signals:   (horizon = '5d') => get('/signals', { horizon }, { horizon }),
 
   pulse:     (horizon = '5d') => get('/pulse', { horizon }, { horizon }),
+
+  screen:    (horizon = '5d') => get('/screen', { horizon }, { horizon }),
+
+  fundamentals: () => get('/fundamentals', undefined, {}),
 
   news:        (sector, limit = 24, range = 'all') => get('/news', { sector, limit, range }, { sector }),
   newsSectors: () => get('/news/sectors', undefined, {}),

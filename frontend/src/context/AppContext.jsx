@@ -8,6 +8,7 @@ const Ctx = createContext(null);
 const defaultPrefs = {
   horizon: DEFAULT_HORIZON,
   model:   'ensemble_clf',
+  savedScreens: [],
 };
 
 const defaultWatchlist = ['RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'BHARTIARTL.NS'];
@@ -15,6 +16,8 @@ const defaultWatchlist = ['RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'BH
 const sanitizePrefs = (p = {}) => ({
   horizon: isValidHorizon(p.horizon) ? p.horizon : DEFAULT_HORIZON,
   model:   typeof p.model === 'string' ? p.model : 'ensemble_clf',
+  // Saved screener filter sets — kept as-is (array of {id,name,filters}).
+  savedScreens: Array.isArray(p.savedScreens) ? p.savedScreens : [],
 });
 
 export const AppProvider = ({ children }) => {

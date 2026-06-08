@@ -77,6 +77,7 @@ export default {
         scaleIn: 'scaleIn 220ms cubic-bezier(0.22, 0.61, 0.36, 1) both',
         slideUpIn: 'slideUpIn 320ms cubic-bezier(0.22, 0.61, 0.36, 1) both',
         tickerScroll: 'tickerScroll 70s linear infinite',
+        'spin-slow': 'spin 4s linear infinite',
       },
     },
   },

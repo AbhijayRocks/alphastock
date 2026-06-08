@@ -36,6 +36,8 @@ from api.schemas import (
     SimulateRequest, SimulateResponse, SimulateFan,
     SignalsResponse, SignalItem,
     PulseResponse,
+    FundamentalsResponse, FundamentalInfo,
+    ScreenResponse, ScreenRow,
     NewsItem, NewsResponse, NewsSectorsResponse,
 )
 from api.model_registry import ModelRegistry
@@ -325,6 +327,47 @@ async def pulse(horizon: str = "5d"):
     except Exception as e:
         logger.error(f"Market pulse failed for {horizon}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Screener (one rich row per stock) ─────────────────────────────────────────--
+
+@router.get("/screen", response_model=ScreenResponse)
+async def screen(horizon: str = "5d"):
+    """
+    Full screener board in a single cached call: per-stock model direction /
+    probability / expected return, key technicals (RSI, MACD, vs moving averages,
+    52-week range, recent returns, volume, vol), fundamentals, and the
+    cross-sectional long/short side. Replaces 50 per-stock /predict calls.
+    """
+    _check_registry()
+    if horizon not in ["1d", "5d", "20d"]:
+        raise HTTPException(status_code=400, detail=f"Invalid horizon '{horizon}'")
+    try:
+        rows = registry.screen(horizon)
+    except Exception as e:
+        logger.error(f"Screen failed for {horizon}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    return ScreenResponse(horizon=horizon, count=len(rows), rows=[ScreenRow(**r) for r in rows])
+
+
+# ── Fundamentals (screener) ───────────────────────────────────────────────────--
+
+@router.get("/fundamentals", response_model=FundamentalsResponse)
+async def fundamentals():
+    """
+    Per-stock fundamentals (P/E, P/B, ROE, debt/equity, growth, dividend yield,
+    market cap, beta) for the screener, normalized to clean display units and
+    keyed by ticker stem. One cached read of the raw fundamentals snapshot.
+    """
+    _check_registry()
+    try:
+        data = registry.get_fundamentals()
+    except Exception as e:
+        logger.error(f"Fundamentals fetch failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    return FundamentalsResponse(
+        fundamentals={k: FundamentalInfo(**v) for k, v in data.items()}
+    )
 
 
 # ── Monte Carlo Simulation ──────────────────────────────────────────────────────

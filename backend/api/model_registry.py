@@ -78,6 +78,15 @@ class ModelRegistry:
         self._pulse_cache: Dict[str, tuple] = {}
         self._pulse_cache_ttl: float = 120.0
 
+        # Fundamentals snapshot (P/E, ROE, market cap, …) keyed by ticker stem.
+        # Loaded once from the raw parquet and reused (refreshes on data reload).
+        self._fundamentals_cache: Optional[Dict[str, Dict]] = None
+
+        # Screener snapshot {horizon: (ts, rows)} — one rich row per stock (model
+        # + technicals + fundamentals + cross-sectional signal). Short TTL.
+        self._screen_cache: Dict[str, tuple] = {}
+        self._screen_cache_ttl: float = 120.0
+
     def load_all(self) -> None:
         """
         Scan models directory and load everything into memory.
@@ -316,6 +325,8 @@ class ModelRegistry:
         self._regime_cache = {}
         self._signals_cache = {}
         self._pulse_cache = {}
+        self._fundamentals_cache = None
+        self._screen_cache = {}
         self._garch_vol_1d = {}
         self._merton_params = {}
 
@@ -1131,6 +1142,160 @@ class ModelRegistry:
         }
         self._pulse_cache[horizon] = (time.time(), result)
         return result
+
+    # ── Fundamentals (screener) ──────────────────────────────────────────────────
+
+    def get_fundamentals(self) -> Dict[str, Dict]:
+        """
+        Per-stock fundamentals for the screener, keyed by ticker stem (e.g.
+        "RELIANCE_NS"), normalized to clean display units so the frontend just
+        renders:
+          market_cap_cr (₹ crore) · pe · forward_pe · pb · roe % · roa % ·
+          de (ratio) · revenue_growth % · earnings_growth % · dividend_yield % ·
+          beta
+
+        Source is the raw fundamentals snapshot (yfinance), which mixes units —
+        ROE/ROA/growth are fractions, dividend yield & debt/equity are percents,
+        market cap is absolute INR — so we convert here, once, and cache.
+        """
+        if self._fundamentals_cache is not None:
+            return self._fundamentals_cache
+
+        import math
+        from config import FEATURES_DIR
+
+        out: Dict[str, Dict] = {}
+        try:
+            path = FEATURES_DIR / "raw" / "fundamentals.parquet"
+            if not path.exists():
+                self._fundamentals_cache = {}
+                return out
+
+            df = pd.read_parquet(path)
+
+            def num(value, scale=1.0, nd=2):
+                try:
+                    f = float(value) * scale
+                except (TypeError, ValueError):
+                    return None
+                if math.isnan(f) or math.isinf(f):
+                    return None
+                return round(f, nd)
+
+            for ticker, row in df.iterrows():
+                stem = str(ticker).replace(".NS", "_NS").replace("&", "_").replace("-", "_")
+                out[stem] = {
+                    "market_cap_cr":   num(row.get("market_cap"), 1 / 1e7, 0),  # INR → ₹ crore
+                    "pe":              num(row.get("pe_ratio")),
+                    "forward_pe":      num(row.get("forward_pe")),
+                    "pb":              num(row.get("pb_ratio")),
+                    "roe":             num(row.get("roe"), 100),               # fraction → %
+                    "roa":             num(row.get("roa"), 100),
+                    "de":              num(row.get("debt_to_equity"), 1 / 100),  # % → ratio
+                    "revenue_growth":  num(row.get("revenue_growth"), 100),
+                    "earnings_growth": num(row.get("earnings_growth"), 100),
+                    "dividend_yield":  num(row.get("dividend_yield")),          # already %
+                    "beta":            num(row.get("beta")),
+                }
+            self._fundamentals_cache = out
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"fundamentals load failed: {e}")
+            self._fundamentals_cache = {}
+        return self._fundamentals_cache
+
+    # ── Screener (one rich row per stock) ────────────────────────────────────────
+
+    # Screener technical fields → source feature column (from the latest bar).
+    _SCREEN_TECH_FIELDS = {
+        "rsi_14":        "rsi_14",
+        "macd_hist":     "macd_hist",
+        "vs_sma_50":     "price_vs_sma_50",     # (close-SMA50)/SMA50; >0 = above
+        "vs_sma_200":    "price_vs_sma_200",
+        "from_52w_high": "pct_from_52w_high",    # <0 = below the high
+        "from_52w_low":  "pct_from_52w_low",
+        "ret_5d":        "return_5d",
+        "ret_20d":       "return_20d",
+        "ret_60d":       "return_60d",
+        "rvol":          "rvol_20d",             # volume vs 20d average
+        "garch_vol":     "garch_vol",            # conditional daily vol
+    }
+
+    def screen(self, horizon: str = "5d") -> List[Dict]:
+        """
+        One rich row per stock for the screener — model direction/probability,
+        expected return, key technicals (from the latest feature bar),
+        fundamentals, and the cross-sectional long/short side. Classifier-only
+        (no Monte-Carlo), cached ~120s, so the whole board is one fast call
+        instead of 50 /predict round-trips.
+        """
+        cached = self._screen_cache.get(horizon)
+        if cached and (time.time() - cached[0]) < self._screen_cache_ttl:
+            return cached[1]
+
+        import math
+
+        def clean(value, nd=4):
+            try:
+                f = float(value)
+            except (TypeError, ValueError):
+                return None
+            if math.isnan(f) or math.isinf(f):
+                return None
+            return round(f, nd)
+
+        prices = self.get_all_prices()
+        funds  = self.get_fundamentals()
+        regime = self.get_current_regime().get("regime", "unknown")
+
+        # Cross-sectional long/short side per ticker (best-effort; may be absent).
+        sig_map: Dict[str, Dict] = {}
+        try:
+            sig = self.cross_sectional_signals(horizon)
+            for s in sig.get("longs", []):
+                sig_map[s["ticker"]] = {"side": "LONG", "rank": s.get("rank"), "confidence": s.get("confidence")}
+            for s in sig.get("shorts", []):
+                sig_map[s["ticker"]] = {"side": "SHORT", "rank": s.get("rank"), "confidence": s.get("confidence")}
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"screen: signals unavailable for {horizon}: {e}")
+
+        rows: List[Dict] = []
+        for ticker in sorted(self.available_tickers):
+            feat = self._features.get(ticker)
+            if feat is None or len(feat) == 0:
+                continue
+            last = feat.iloc[-1]
+
+            prob = self._direction_proba(ticker, horizon)
+            if prob is None:
+                prob = 0.5
+            pred_ret = self._get_regression_prediction(ticker, horizon)
+            dist = abs(prob - 0.5)
+            strength = "strong" if dist >= 0.15 else "moderate" if dist >= 0.08 else "weak"
+
+            px = prices.get(ticker, {})
+            price = px.get("price")
+            if price is None:
+                price = self._get_current_price(ticker)
+            meta = self.get_stock_meta(ticker)
+
+            rows.append({
+                "ticker":           ticker,
+                "company_name":     meta.get("name"),
+                "sector":           meta.get("sector"),
+                "current_price":    clean(price, 2),
+                "pct_change":       clean(px.get("pct_change"), 2),
+                "direction":        "UP" if prob > 0.5 else "DOWN",
+                "probability":      round(float(prob), 4),
+                "predicted_return": clean(pred_ret),
+                "signal_strength":  strength,
+                "technicals":       {k: clean(last.get(src)) for k, src in self._SCREEN_TECH_FIELDS.items()},
+                "fundamentals":     funds.get(ticker),
+                "signal":           sig_map.get(ticker),
+                "regime":           regime,
+            })
+
+        self._screen_cache[horizon] = (time.time(), rows)
+        return rows
 
     # ── Meta Helpers ───────────────────────────────────────────────────────────
 

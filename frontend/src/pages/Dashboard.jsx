@@ -238,16 +238,10 @@ const SectorHeat = ({ predictions = [] }) => {
                   : `linear-gradient(135deg, rgba(244,63,94,${0.18 * intensity}), transparent)`,
               }}
             />
-            <div className="relative flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <div className="text-2xs font-medium tracking-wider uppercase text-ink-4 truncate">{s.sector}</div>
-                <div className={cn('font-display font-semibold text-md tabular', pos ? 'text-bull' : 'text-bear')}>
-                  {pos ? '+' : ''}{pct.toFixed(2)}%
-                </div>
-              </div>
-              <div className="text-right shrink-0">
-                <div className="text-2xs text-ink-3 tabular">{s.count}</div>
-                <div className="text-2xs text-ink-5">stocks</div>
+            <div className="relative min-w-0">
+              <div className="text-2xs font-medium tracking-wider uppercase text-ink-4 truncate">{s.sector}</div>
+              <div className={cn('font-display font-semibold text-md tabular', pos ? 'text-bull' : 'text-bear')}>
+                {pos ? '+' : ''}{pct.toFixed(2)}%
               </div>
             </div>
           </div>
