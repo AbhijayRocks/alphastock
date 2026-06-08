@@ -58,6 +58,36 @@ export const mockRegime = () => {
   return { regime, description: descriptions[regime], since: since.toISOString().slice(0, 10), duration_days };
 };
 
+// ── /api/pulse ────────────────────────────────────────────────────────────────
+const PULSE_LABELS = [[56, 'Bullish'], [53, 'Mildly Bullish'], [48, 'Neutral'], [45, 'Cautious'], [0, 'Bearish']];
+const PULSE_STANCE = { bull: 'Risk-On', bear: 'Risk-Off', sideways: 'Neutral', crisis: 'Defensive' };
+
+export const mockPulse = (horizon = '5d') => {
+  const reg = mockRegime();
+  const n = UNIVERSE.length;
+  const seed = Math.floor(Date.now() / 3600000);          // shifts hourly
+  const advancers = 18 + (seed % 20);                      // 18..37
+  const decliners = n - advancers;
+  const pct_advancing = Math.round((advancers / n) * 1000) / 10;
+  const tilted_up = 22 + (seed % 18);                      // 22..39
+  const avg_prob_up = 0.5 + ((tilted_up - n / 2) / n) * 0.18;
+  const conviction = Math.round(avg_prob_up * 100);
+  const conviction_label = PULSE_LABELS.find(([t]) => conviction >= t)[1];
+  return {
+    horizon,
+    conviction,
+    conviction_label,
+    avg_prob_up: Math.round(avg_prob_up * 1e4) / 1e4,
+    tilted_up,
+    universe: n,
+    breadth: { advancers, decliners, unchanged: 0, pct_advancing },
+    leading_sector: { sector: 'Information Technology', avg_change: 1.24 },
+    lagging_sector: { sector: 'Metals', avg_change: -0.91 },
+    regime: reg.regime,
+    stance: PULSE_STANCE[reg.regime] || '—',
+  };
+};
+
 // ── /api/models ───────────────────────────────────────────────────────────────
 export const mockModels = () => ({
   total_stocks: UNIVERSE.length,
@@ -250,6 +280,38 @@ export const mockSignals = (horizon = '5d') => {
     shorts: mk(scored.slice(-k).reverse(), 'SHORT'),
     summary: `Demo market-neutral board (${horizon}).`,
   };
+};
+
+// ── /api/news ─────────────────────────────────────────────────────────────────
+export const mockNewsSectors = () => ({
+  sectors: [
+    'Financial Services', 'Information Technology', 'Energy', 'FMCG', 'Healthcare',
+    'Materials', 'Consumer Discretionary', 'Communication', 'Capital Goods',
+    'Utilities', 'Industrials',
+  ],
+});
+
+export const mockNews = (sector = 'Financial Services') => {
+  const rng = seedRandom(hashStr('news:' + sector));
+  const srcs = ['Economic Times', 'Moneycontrol', 'Business Standard', 'LiveMint', 'Reuters'];
+  const templates = [
+    `${sector} stocks rally as investors turn optimistic`,
+    `Top ${sector} picks for the week ahead`,
+    `${sector} index outperforms the broader market`,
+    `Analysts upgrade key ${sector} names on strong outlook`,
+    `${sector} sector faces headwinds amid global cues`,
+    `What's really driving the ${sector} move?`,
+    `FIIs increase exposure to ${sector} stocks`,
+    `${sector}: earnings season preview and what to watch`,
+  ];
+  const articles = templates.map((t, i) => ({
+    headline: t,
+    link: 'https://news.google.com',
+    source: srcs[Math.floor(rng() * srcs.length)],
+    published: new Date(Date.now() - i * 3600 * 1000 * (1 + rng() * 4)).toISOString(),
+    summary: `Demo summary. Connect the backend for live ${sector} news.`,
+  }));
+  return { sector, count: articles.length, articles };
 };
 
 // ── /api/optimize_portfolio ───────────────────────────────────────────────────

@@ -31,6 +31,7 @@ AlphaStock turns a decade of NSE market history into clear, explainable analytic
 - **Market regime** — automatic Bull / Bear / Sideways / Crisis detection (Hidden Markov Model) that maps to an actionable desk stance.
 - **Robust portfolio optimizer** — **Black-Litterman** (blends model views with index-weight equilibrium), **Hierarchical Risk Parity**, and classic mean-variance — all on a **Ledoit-Wolf-shrunk GARCH covariance** with a position cap.
 - **Walk-forward backtest** — time-series-aware splits vs. a buy-and-hold benchmark, after **realistic NSE transaction costs**, reporting Sharpe, Calmar, max drawdown, hit rate, and excess return.
+- **Sector news** — pick a sector and get the latest India market headlines (source, time, and a link to the article) via free Google News RSS — no API key, no cost.
 - **Market screener** — filter and sort the full NIFTY 50 by direction, strength, sector, and expected return, with CSV export.
 - **Accounts & personalization** — JWT sign-in, per-user watchlist and preferences (SQLite by default, Postgres-ready).
 - **Premium UX** — consistent green/red/neutral P&L system, animated charts, command palette (`⌘K`), keyboard navigation, and responsive layouts.
@@ -184,6 +185,7 @@ All routes are prefixed with `/api`; interactive Swagger lives at `/docs`.
 | `POST` | `/api/simulate` | Monte-Carlo (Merton jump-diffusion) price fan + tail-risk metrics |
 | `POST` | `/api/optimize_portfolio` | Black-Litterman / HRP / mean-variance allocation (`method=`) |
 | `GET` | `/api/signals` | Cross-sectional market-neutral long/short board (`horizon=`) |
+| `GET` | `/api/news` | Sector news headlines + links (`sector=`), free Google News RSS |
 | `GET` | `/api/models` | Stocks with trained models, sectors, and accuracy |
 | `GET` | `/api/prices` | Current prices and 1-day % change |
 | `GET` | `/api/history/{ticker}` | Historical closing prices (configurable `days`) |

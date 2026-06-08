@@ -222,3 +222,47 @@ class SignalsResponse(BaseModel):
     longs: List[SignalItem]
     shorts: List[SignalItem]
     summary: str
+
+
+class BreadthInfo(BaseModel):
+    advancers: int
+    decliners: int
+    unchanged: int
+    pct_advancing: float          # share of moving names that are up (0..100)
+
+
+class SectorMove(BaseModel):
+    sector: str
+    avg_change: float             # today's average % move for the sector
+
+
+class PulseResponse(BaseModel):
+    horizon: str
+    conviction: int               # 0..100 aggregate model conviction
+    conviction_label: str         # Bearish | Cautious | Neutral | Mildly Bullish | Bullish
+    avg_prob_up: float            # mean classifier P(up) across the universe
+    tilted_up: int                # # of names the model tilts UP
+    universe: int                 # # of names scored
+    breadth: BreadthInfo
+    leading_sector: Optional[SectorMove] = None
+    lagging_sector: Optional[SectorMove] = None
+    regime: str
+    stance: str                   # desk stance implied by the regime
+
+
+class NewsItem(BaseModel):
+    headline: str
+    link: str
+    source: str
+    published: Optional[str] = None
+    summary: Optional[str] = None
+
+
+class NewsResponse(BaseModel):
+    sector: str
+    count: int
+    articles: List[NewsItem]
+
+
+class NewsSectorsResponse(BaseModel):
+    sectors: List[str]

@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Wordmark } from './Logo.jsx';
 import {
   IconHome, IconCompass, IconBeaker, IconBriefcase, IconBrain, IconSettings,
-  IconCommand, IconStarFill, IconArrowUp, IconArrowDown, IconX,
+  IconCommand, IconStarFill, IconArrowUp, IconArrowDown, IconX, IconGlobe,
 } from './Icons.jsx';
 import { useApp } from '../../context/AppContext.jsx';
 import { useApi } from '../../hooks/useApi.js';
@@ -18,6 +18,7 @@ const NAV = [
   { to: '/analysis',   label: 'Analysis',  icon: IconBrain,     hotkey: 'G A' },
   { to: '/portfolio',  label: 'Portfolio', icon: IconBriefcase, hotkey: 'G P' },
   { to: '/backtest',   label: 'Backtest',  icon: IconBeaker,    hotkey: 'G B' },
+  { to: '/news',       label: 'News',      icon: IconGlobe,     hotkey: 'G N' },
 ];
 
 const NavItem = ({ to, label, icon: Icon, hotkey, onNavigate }) => (

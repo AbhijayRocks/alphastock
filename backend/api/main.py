@@ -61,6 +61,15 @@ async def lifespan(app: FastAPI):
         registry.load_all()
         set_registry(registry)
         logger.info(f"API ready — {len(registry.available_tickers)} stocks loaded")
+
+        # Keep market data current automatically: a daemon thread catches up on
+        # startup and then refreshes shortly after each NSE close, hot-reloading
+        # the registry in place (no restart). See api/daily_scheduler.py.
+        try:
+            from api.daily_scheduler import start_daily_scheduler
+            start_daily_scheduler(registry)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Daily auto-refresh scheduler failed to start: {e}")
     except Exception as e:  # noqa: BLE001
         logger.error(f"Model registry failed to load: {e}. Auth + docs still available.")
 

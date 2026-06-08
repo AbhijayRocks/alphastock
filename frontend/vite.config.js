@@ -1,3 +1,4 @@
+import { fileURLToPath, URL } from 'node:url'
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 
@@ -10,6 +11,10 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react()],
+    resolve: {
+      // shadcn-style "@/..." imports resolve to /src
+      alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
+    },
     clearScreen: false,
     server: {
       port,

@@ -17,6 +17,7 @@ const Screener  = lazy(() => import('./pages/Screener.jsx'));
 const Analysis  = lazy(() => import('./pages/Analysis.jsx'));
 const Portfolio = lazy(() => import('./pages/Portfolio.jsx'));
 const Backtest  = lazy(() => import('./pages/Backtest.jsx'));
+const News      = lazy(() => import('./pages/News.jsx'));
 const Settings  = lazy(() => import('./pages/Settings.jsx'));
 const NotFound  = lazy(() => import('./pages/NotFound.jsx'));
 
@@ -58,6 +59,7 @@ const App = () => {
   useHotkey('g a', () => navigate('/analysis'));
   useHotkey('g p', () => navigate('/portfolio'));
   useHotkey('g b', () => navigate('/backtest'));
+  useHotkey('g n', () => navigate('/news'));
   useHotkey('g ,', () => navigate('/settings'));
 
   return (
@@ -75,6 +77,7 @@ const App = () => {
                 <Route path="/analysis"  element={<Analysis />} />
                 <Route path="/portfolio" element={<Portfolio />} />
                 <Route path="/backtest"  element={<Backtest />} />
+                <Route path="/news"      element={<News />} />
                 <Route path="/settings"  element={<Settings />} />
                 <Route path="*"          element={<NotFound />} />
               </Routes>

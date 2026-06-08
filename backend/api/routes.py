@@ -35,6 +35,8 @@ from api.schemas import (
     PortfolioOptimizeRequest, PortfolioOptimizeResponse,
     SimulateRequest, SimulateResponse, SimulateFan,
     SignalsResponse, SignalItem,
+    PulseResponse,
+    NewsItem, NewsResponse, NewsSectorsResponse,
 )
 from api.model_registry import ModelRegistry
 from models.portfolio import (
@@ -246,6 +248,32 @@ async def backtest(request: BacktestRequest):
     )
 
 
+# ── News (free, Google News RSS) ────────────────────────────────────────────────
+
+@router.get("/news/sectors", response_model=NewsSectorsResponse)
+async def news_sectors():
+    """List the sectors you can pull news for (the NIFTY-50 universe sectors)."""
+    from data_pipeline.news import available_sectors
+    return NewsSectorsResponse(sectors=available_sectors())
+
+
+@router.get("/news", response_model=NewsResponse)
+async def news(sector: str, limit: int = 24, range: str = "all"):
+    """
+    Latest India news for a sector: headlines, source, time, and a link back to the
+    publisher. Free (Google News RSS), cached ~15 min. `range` filters recency
+    ('1d', '7d', '30d', '1y', or 'all'). No registry required.
+    """
+    try:
+        from data_pipeline.news import fetch_sector_news
+        items = fetch_sector_news(sector, limit, time_range=None if range == "all" else range)
+        return NewsResponse(sector=sector, count=len(items),
+                            articles=[NewsItem(**i) for i in items])
+    except Exception as e:
+        logger.error(f"News fetch failed for {sector}: {e}")
+        raise HTTPException(status_code=502, detail=f"Could not fetch news: {e}")
+
+
 # ── Cross-sectional Long/Short Signals ──────────────────────────────────────────
 
 @router.get("/signals", response_model=SignalsResponse)
@@ -277,6 +305,26 @@ async def signals(horizon: str = "5d"):
         shorts=[SignalItem(**s) for s in sig["shorts"]],
         summary=summary,
     )
+
+
+# ── Market Pulse (dashboard hero) ────────────────────────────────────────────────
+
+@router.get("/pulse", response_model=PulseResponse)
+async def pulse(horizon: str = "5d"):
+    """
+    Aggregate desk snapshot for the dashboard hero: model conviction across the
+    whole NIFTY-50 (0-100), live market breadth (advancers/decliners), the
+    leading/lagging sector today, and the current regime + implied stance.
+    One cached call — cheap enough for the landing page.
+    """
+    _check_registry()
+    if horizon not in ["1d", "5d", "20d"]:
+        raise HTTPException(status_code=400, detail=f"Invalid horizon '{horizon}'")
+    try:
+        return PulseResponse(**registry.market_pulse(horizon))
+    except Exception as e:
+        logger.error(f"Market pulse failed for {horizon}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Monte Carlo Simulation ──────────────────────────────────────────────────────

@@ -73,6 +73,11 @@ class ModelRegistry:
         # Cross-sectional long/short signal board cache {horizon: (ts, result)}.
         self._signals_cache: Dict[str, tuple] = {}
 
+        # Market-pulse cache {horizon: (ts, result)} — aggregate model conviction
+        # + live breadth for the dashboard hero. Short TTL so it tracks the tape.
+        self._pulse_cache: Dict[str, tuple] = {}
+        self._pulse_cache_ttl: float = 120.0
+
     def load_all(self) -> None:
         """
         Scan models directory and load everything into memory.
@@ -292,6 +297,37 @@ class ModelRegistry:
                 logger.warning(f"Feature load failed for {ticker}: {e}")
 
         logger.info(f"Loaded features for {loaded} stocks")
+
+    def reload_live_data(self) -> int:
+        """
+        Hot-reload the latest feature panels from disk and drop derived caches,
+        so a running server picks up a fresh daily data refresh without a restart.
+
+        Re-reads the per-stock pipeline parquets into memory, then clears the
+        regime / signals / GARCH / Merton caches (all derived from the feature
+        data) and re-warms the live-price cache. Safe to call from a background
+        thread. Returns the number of stocks whose features were reloaded.
+        """
+        logger.info("Hot-reloading latest features + clearing derived caches...")
+        self._load_latest_features()
+
+        # Everything below is derived from the feature/price data — invalidate so
+        # the next request recomputes against the freshly loaded panels.
+        self._regime_cache = {}
+        self._signals_cache = {}
+        self._pulse_cache = {}
+        self._garch_vol_1d = {}
+        self._merton_params = {}
+
+        # Re-warm live prices immediately (blocking is fine off the request path).
+        try:
+            self._refresh_prices()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Price re-warm after reload failed: {e}")
+
+        n = len(self._features)
+        logger.info(f"Hot-reload complete: {n} stocks refreshed.")
+        return n
 
     def _load_regime(self) -> None:
         """Load the HMM regime model if available."""
@@ -979,6 +1015,122 @@ class ModelRegistry:
 
         self._signals_cache[horizon] = (time.time(), sig)
         return sig
+
+    # ── Market pulse (dashboard hero) ────────────────────────────────────────────
+
+    def _direction_proba(self, ticker: str, horizon: str) -> Optional[float]:
+        """
+        Cheap UP-probability for the latest bar — classifier only, no Monte-Carlo
+        / GARCH. Used to aggregate conviction across the universe.
+        """
+        models = self._models.get(ticker, {}).get(horizon, {})
+        if not models or ticker not in self._features:
+            return None
+        latest = self._features[ticker].iloc[-1:]
+        try:
+            if "ensemble_clf" in models:
+                ens = self._predict_ensemble_proba(ticker, horizon, latest)
+                if ens is not None:
+                    return float(ens[-1])
+            for name in ("lightgbm_clf", "xgboost_clf"):
+                bundle = models.get(name)
+                if bundle is None:
+                    continue
+                feat_names = bundle.get("meta", {}).get("feature_names", list(latest.columns))
+                X = self._align_features(latest, feat_names)
+                return float(self._run_model_predict(bundle, X, name, feat_names))
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"pulse proba failed for {ticker}/{horizon}: {e}")
+        return None
+
+    _CONVICTION_LABELS = (
+        (56, "Bullish"), (53, "Mildly Bullish"), (48, "Neutral"),
+        (45, "Cautious"), (0, "Bearish"),
+    )
+    _REGIME_STANCE = {
+        "bull": "Risk-On", "bear": "Risk-Off", "sideways": "Neutral",
+        "crisis": "Defensive", "unknown": "—",
+    }
+
+    def market_pulse(self, horizon: str = "5d") -> Dict:
+        """
+        Dashboard hero payload — one fast call that fuses:
+          • aggregate model conviction across the whole NIFTY-50 (0-100 index =
+            mean classifier P(up) at `horizon`, plus how many names tilt up),
+          • live market breadth (advancers/decliners) from cached quotes,
+          • leading / lagging sector by today's average move,
+          • current market regime + the desk stance it implies.
+
+        Classifier-only (no Monte-Carlo), cached ~120s, so it's cheap enough to
+        sit on the landing page. Never raises.
+        """
+        cached = self._pulse_cache.get(horizon)
+        if cached and (time.time() - cached[0]) < self._pulse_cache_ttl:
+            return cached[1]
+
+        # ── Live breadth + sector aggregation ────────────────────────────────
+        prices = self.get_all_prices()
+        adv = dec = unch = 0
+        sector_moves: Dict[str, List[float]] = {}
+        for ticker, px in prices.items():
+            chg = float(px.get("pct_change", 0.0) or 0.0)
+            if chg > 0:
+                adv += 1
+            elif chg < 0:
+                dec += 1
+            else:
+                unch += 1
+            sector = self.get_stock_meta(ticker).get("sector") or "Other"
+            sector_moves.setdefault(sector, []).append(chg)
+
+        total_moving = adv + dec
+        pct_advancing = round(100 * adv / total_moving, 1) if total_moving else 0.0
+
+        sector_avg = {s: sum(v) / len(v) for s, v in sector_moves.items() if v}
+        leading = lagging = None
+        if sector_avg:
+            lead_name = max(sector_avg, key=sector_avg.get)
+            lag_name  = min(sector_avg, key=sector_avg.get)
+            leading = {"sector": lead_name, "avg_change": round(sector_avg[lead_name], 2)}
+            lagging = {"sector": lag_name,  "avg_change": round(sector_avg[lag_name], 2)}
+
+        # ── Aggregate model conviction ───────────────────────────────────────
+        probs = [p for p in (self._direction_proba(t, horizon) for t in self.available_tickers)
+                 if p is not None]
+        if probs:
+            avg_prob   = sum(probs) / len(probs)
+            tilted_up  = sum(1 for p in probs if p > 0.5)
+            conviction = round(avg_prob * 100)
+        else:
+            avg_prob, tilted_up, conviction = 0.5, 0, 50
+
+        label = next(lbl for thr, lbl in self._CONVICTION_LABELS if conviction >= thr)
+
+        # ── Regime context ───────────────────────────────────────────────────
+        regime_info = self.get_current_regime()
+        regime = regime_info.get("regime", "unknown")
+        stance = self._REGIME_STANCE.get(regime, "—")
+
+        result = {
+            "horizon": horizon,
+            "conviction": int(conviction),
+            "conviction_label": label,
+            "avg_prob_up": round(avg_prob, 4),
+            "tilted_up": int(tilted_up),
+            "universe": len(probs),
+            "breadth": {
+                "advancers": adv,
+                "decliners": dec,
+                "unchanged": unch,
+                "pct_advancing": pct_advancing,
+            },
+            "leading_sector": leading,
+            "lagging_sector": lagging,
+            "regime": regime,
+            "stance": stance,
+        }
+        self._pulse_cache[horizon] = (time.time(), result)
+        return result
 
     # ── Meta Helpers ───────────────────────────────────────────────────────────
 

@@ -23,6 +23,14 @@ portfolio optimization.
 - Frontend has **offline mock mode** (`src/data/mock.js`): if the API is
   unreachable or returns empty, it shows synthetic demo data. Real data requires
   the backend up **with trained models loaded**.
+- **Automatic daily data refresh (live):** while the backend runs, a daemon
+  thread (`api/daily_scheduler.py`) catches up on startup and then refreshes
+  shortly after each NSE close (18:00 IST, override `ALPHASTOCK_UPDATE_HOUR`),
+  then **hot-reloads features in place — no restart** (`ModelRegistry.reload_live_data`).
+  Work is in `data_pipeline/daily_update.py` (incremental OHLCV + macro/index
+  refresh → rebuild features only when a newer bar arrived; idempotent, never
+  raises). Manual / OS-cron form: `python -m data_pipeline.daily_update [--force]`.
+  Disable with `ALPHASTOCK_DAILY_UPDATE=0`.
 
 ## 3. Environment & gotchas (IMPORTANT for a new chat)
 - **Python 3.14** (`C:\Python314`). Several ML libs don't support it:
@@ -120,6 +128,10 @@ PROJECT_STATE.md         (this file)
   views with NIFTY index-weight equilibrium), **hrp** (Hierarchical Risk Parity,
   diversification-first), **mvo** (plain Markowitz). All run on a **Ledoit-Wolf-
   shrunk GARCH covariance** with a **40% position cap**. `models/portfolio.py`.
+### Market news (`/api/news`, News page)
+- Free sector news via **Google News RSS** (no API key, no cost), cached ~15 min.
+  User picks a sector → headlines + source + time + link to the publisher.
+  `data_pipeline/news.py`. Also `fetch_stock_news` (per-company) available.
 ### Cross-sectional long/short signals (`/api/signals`, Dashboard card)
 - Market-neutral **rank + meta-labeling** board (the quant research model, now
   productionized): top quintile LONG / bottom SHORT, with score, meta confidence,
@@ -133,6 +145,7 @@ PROJECT_STATE.md         (this file)
 `GET /api/history/{ticker}` · `POST /api/predict` · `POST /api/explain` ·
 `POST /api/backtest` · `POST /api/simulate` · `POST /api/optimize_portfolio` ·
 `GET /api/signals?horizon=` (cross-sectional long/short board) ·
+`GET /api/news?sector=` · `GET /api/news/sectors` (free Google-News RSS) ·
 `POST /api/auth/register|login` · `GET/PATCH /api/auth/me` · `GET/PUT /api/user/data`
 
 ## 8. Risk / uncertainty stack (how the pieces fit)
@@ -157,6 +170,12 @@ GARCH also feeds: prediction bands, a model feature (`garch_vol`,
    (future price). Inflated cross-sectional IC to 0.28 / Sharpe 8.9. Fixed in
    `technical.py` (`lookahead=False`, drop ICS). Features rebuilt; models
    retraining.
+8. **Daily data never auto-updated.** `run_incremental_update` was doubly broken:
+   it reused `fetch_ohlcv`'s 252-row history guard (so every short pull was
+   discarded → 0 stocks appended) and used `end=date.today()`, which yfinance
+   treats as *exclusive* (so today's bar was never fetched). Added a `min_rows`
+   param (incremental passes `1`) and set `end=today+1`. Also wired an in-process
+   daily scheduler (was previously no automation at all). See §2.
 
 ## 10. Known open risks / limitations
 - **Survivorship bias:** using today's NIFTY-50 over 18y (winners only).

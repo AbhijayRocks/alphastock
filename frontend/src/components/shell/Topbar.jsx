@@ -1,14 +1,10 @@
 import React from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { LayoutDashboard, Compass, Brain, Briefcase, FlaskConical, Newspaper, Settings } from 'lucide-react';
 import { useApp } from '../../context/AppContext.jsx';
-import { useApi } from '../../hooks/useApi.js';
-import { api } from '../../api/client.js';
-import { Badge } from '../ui/Badge.jsx';
-import { Tooltip } from '../ui/Tooltip.jsx';
 import { UserMenu } from './UserMenu.jsx';
-import { IconCommand, IconRefresh, IconActivity } from './Icons.jsx';
-import { REGIME_META } from '../../data/universe.js';
-import { cn } from '../../lib/utils.js';
+import { IconCommand } from './Icons.jsx';
+import { ExpandableTabs } from '@/components/ui/expandable-tabs.jsx';
 
 const ROUTE_TITLES = {
   '/':          { eyebrow: 'Command Center', title: 'Market Overview' },
@@ -19,6 +15,20 @@ const ROUTE_TITLES = {
   '/settings':  { eyebrow: 'Configuration',  title: 'Settings' },
 };
 
+// Quick-nav for the top bar. A `route: null` entry marks a separator slot so
+// the onChange index lines up 1:1 with the array passed to ExpandableTabs.
+const NAV_TABS = [
+  { title: 'Overview',  icon: LayoutDashboard, route: '/' },
+  { title: 'Screener',  icon: Compass,         route: '/screener' },
+  { title: 'Analysis',  icon: Brain,           route: '/analysis' },
+  { type: 'separator',  route: null },
+  { title: 'Portfolio', icon: Briefcase,       route: '/portfolio' },
+  { title: 'Backtest',  icon: FlaskConical,    route: '/backtest' },
+  { title: 'News',      icon: Newspaper,       route: '/news' },
+  { type: 'separator',  route: null },
+  { title: 'Settings',  icon: Settings,        route: '/settings' },
+];
+
 const HamburgerIcon = (p) => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" {...p}>
     <path d="M4 7h16M4 12h16M4 17h16" />
@@ -27,11 +37,14 @@ const HamburgerIcon = (p) => (
 
 export const Topbar = () => {
   const { pathname } = useLocation();
-  const { backend, setPaletteOpen, setSidebarOpen } = useApp();
-  const { data: regime, loading: rLoading, refetch: rRefetch } = useApi(() => api.regime(), []);
+  const navigate = useNavigate();
+  const { setPaletteOpen, setSidebarOpen } = useApp();
   const meta = ROUTE_TITLES[pathname] || { eyebrow: 'AlphaStock', title: 'Terminal' };
-  const r = regime?.regime || 'unknown';
-  const rm = REGIME_META[r] || REGIME_META.unknown;
+
+  const handleNavSelect = (index) => {
+    const route = index != null ? NAV_TABS[index]?.route : null;
+    if (route && route !== pathname) navigate(route);
+  };
 
   return (
     <header className="sticky top-0 z-30 bg-bg-0/85 backdrop-blur-md border-b border-line-faint">
@@ -50,37 +63,15 @@ export const Topbar = () => {
           <h1 className="font-display font-semibold text-md text-ink-1 leading-tight truncate">{meta.title}</h1>
         </div>
 
-        <div className="hairline-v h-8 mx-2 hidden md:block" />
-
-        {/* Regime indicator */}
-        <Tooltip content={rm.description}>
-          <button
-            onClick={rRefetch}
-            className="hidden md:inline-flex items-center gap-2 h-8 px-2.5 rounded-lg border border-line-muted bg-bg-1 hover:bg-bg-2 transition-colors group"
-            aria-label={`Market regime: ${rm.label}. Click to refresh.`}
-          >
-            <span className={cn(
-              'w-1.5 h-1.5 rounded-full',
-              rm.tone === 'bull' && 'bg-bull animate-pulseSoft',
-              rm.tone === 'bear' && 'bg-bear animate-pulseSoft',
-              rm.tone === 'warn' && 'bg-warn animate-pulseSoft',
-              (rm.tone === 'ink' || !rm.tone) && 'bg-ink-4',
-            )} />
-            <span className="text-2xs font-medium tracking-wider uppercase text-ink-3">Regime</span>
-            <span className="text-xs font-semibold text-ink-1">{rLoading ? '…' : rm.label}</span>
-            <IconRefresh className="w-3 h-3 text-ink-5 opacity-0 group-hover:opacity-100 transition-opacity" />
-          </button>
-        </Tooltip>
-
         <div className="ml-auto flex items-center gap-2">
-          <Badge
-            tone={backend.backendOk ? 'bull' : 'warn'}
-            dot
-            size="sm"
-            className="hidden sm:inline-flex"
-          >
-            {backend.backendOk === null ? 'Connecting…' : backend.backendOk ? 'Live data' : 'Offline'}
-          </Badge>
+          {/* Expandable quick-nav (large screens) */}
+          <ExpandableTabs
+            tabs={NAV_TABS.map(({ route, ...tab }) => tab)}
+            onChange={handleNavSelect}
+            className="hidden xl:flex mr-1 border-line-faint bg-bg-1/60 shadow-none"
+          />
+
+          <div className="hairline-v h-7 mx-0.5 hidden xl:block" />
 
           <button
             onClick={() => setPaletteOpen(true)}

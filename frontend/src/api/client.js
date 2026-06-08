@@ -6,6 +6,7 @@ import axios from 'axios';
 import {
   mockHealth, mockRegime, mockModels, mockPrices, mockHistory,
   mockPredict, mockExplain, mockBacktest, mockOptimize, mockSimulate, mockSignals,
+  mockNews, mockNewsSectors, mockPulse,
 } from '../data/mock.js';
 
 const STORAGE_KEY = 'alphastock.config.v1';
@@ -52,6 +53,9 @@ const mock = {
   '/optimize_portfolio':(body) => mockOptimize(body),
   '/simulate':          (body) => mockSimulate(body),
   '/signals':           ({ horizon }) => mockSignals(horizon),
+  '/pulse':             ({ horizon }) => mockPulse(horizon),
+  '/news':              ({ sector }) => mockNews(sector),
+  '/news/sectors':      () => mockNewsSectors(),
 };
 
 const useMock = () => config.mockMode === 'on';
@@ -121,6 +125,11 @@ export const api = {
     post('/simulate', { ticker, horizon, n_sims }),
 
   signals:   (horizon = '5d') => get('/signals', { horizon }, { horizon }),
+
+  pulse:     (horizon = '5d') => get('/pulse', { horizon }, { horizon }),
+
+  news:        (sector, limit = 24, range = 'all') => get('/news', { sector, limit, range }, { sector }),
+  newsSectors: () => get('/news/sectors', undefined, {}),
 };
 
 // Background probe at startup so UI can show "live" vs "demo" badge

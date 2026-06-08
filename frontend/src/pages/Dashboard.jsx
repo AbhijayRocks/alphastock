@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 import { useApi } from '../hooks/useApi.js';
 import { api } from '../api/client.js';
 import { useApp } from '../context/AppContext.jsx';
-import { RegimeBanner } from '../components/domain/RegimeBanner.jsx';
+import { MarketPulse } from '../components/domain/MarketPulse.jsx';
 import { HorizonSwitcher } from '../components/domain/HorizonSwitcher.jsx';
 import { DirectionPill, SignalStrengthBar, ConfidenceMeter } from '../components/domain/DirectionPill.jsx';
 import { TickerCell } from '../components/domain/TickerCell.jsx';
@@ -292,9 +292,9 @@ const Dashboard = () => {
 
   return (
     <div className="space-y-5 pb-12">
-      {/* Hero strip: regime + horizon picker */}
+      {/* Hero strip: market pulse + horizon picker */}
       <motion.div {...fadeUp} className="flex flex-col gap-4">
-        <RegimeBanner />
+        <MarketPulse horizon={horizon} />
 
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div className="flex items-center gap-3 flex-wrap">

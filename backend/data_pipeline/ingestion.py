@@ -76,10 +76,15 @@ def fetch_ohlcv(
     start: str = HISTORICAL_START,
     end: str = HISTORICAL_END,
     interval: str = DATA_INTERVAL,
+    min_rows: int = 252,
 ) -> Dict[str, pd.DataFrame]:
     """
     Fetch OHLCV for a list of tickers in one batched API call.
     Returns dict of {ticker: DataFrame with lowercase columns [open,high,low,close,volume]}
+
+    `min_rows` rejects tickers with too little history — sensible for the full
+    historical pull (default 252), but incremental refreshes (a few new days)
+    must pass `min_rows=1` or every short pull is discarded.
     """
     logger.info(f"Fetching OHLCV for {len(tickers)} tickers from {start} to {end}")
     end_str = str(date.today()) if end == "today" else end
@@ -108,8 +113,8 @@ def fetch_ohlcv(
 
             df = df.dropna(subset=["close"])
 
-            if len(df) < 252:
-                logger.warning(f"{ticker}: only {len(df)} rows, skipping (need 252+)")
+            if len(df) < min_rows:
+                logger.warning(f"{ticker}: only {len(df)} rows, skipping (need {min_rows}+)")
                 continue
 
             df.index.name = "date"
@@ -335,9 +340,14 @@ def run_incremental_update(tickers: Optional[List[str]] = None) -> None:
         tickers = get_all_tickers()
 
     start = (pd.Timestamp.today() - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
-    logger.info(f"Running incremental update from {start}...")
+    # yfinance's `end` is EXCLUSIVE, so use tomorrow to include today's bar once
+    # the session has closed and the daily candle is published.
+    end = (pd.Timestamp.today() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    logger.info(f"Running incremental update from {start} to {end} (exclusive)...")
 
-    ohlcv_new = fetch_ohlcv(tickers, start=start)
+    # min_rows=1: a few fresh days is exactly what we want here — the 252-row
+    # history guard is only meaningful for the initial full pull.
+    ohlcv_new = fetch_ohlcv(tickers, start=start, end=end, min_rows=1)
     ohlcv_dir = RAW_DIR / "ohlcv"
 
     for ticker, new_df in ohlcv_new.items():
