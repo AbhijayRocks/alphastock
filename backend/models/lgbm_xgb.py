@@ -222,15 +222,13 @@ class LightGBMModel(BaseModel):
         logger.info(f"LightGBM best val RMSE: {study.best_value:.6f}")
         logger.info(f"Best params: {self._best_params}")
 
-        # Final training with best params on train+val combined
+        # Final training with best params.
+        # We train on X_train and keep X_val held out as the early-stopping set,
+        # so val cannot be folded into the training data here.
         best_params = {
             **self._get_default_params(),
             **self._best_params,
         }
-
-        # Combine train + val for final model
-        X_full = np.vstack([X_train, X_val])
-        y_full = np.concatenate([y_train, y_val])
 
         train_data = lgb.Dataset(X_train, label=y_train, feature_name=feature_names, weight=sample_weights)
         val_data   = lgb.Dataset(X_val,   label=y_val,   reference=train_data)

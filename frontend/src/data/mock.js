@@ -198,6 +198,60 @@ export const mockBacktest = ({ ticker, horizon = '1d', transaction_cost = 0.001 
   };
 };
 
+// ── /api/simulate (Monte Carlo fan) ───────────────────────────────────────────
+export const mockSimulate = ({ ticker, horizon = '20d', n_sims = 2000 }) => {
+  const apiTicker = String(ticker).toUpperCase();
+  const display = toDisplayTicker(apiTicker);
+  const meta = META_BY_TICKER[display] || { weight: 1.5 };
+  const S0 = 300 + meta.weight * 220;
+  const days = { '1d': 1, '5d': 5, '20d': 20 }[horizon] || 20;
+  const rng = seedRandom(hashStr(apiTicker + ':mc'));
+  const drift = (rng() - 0.45) * 0.012;
+  const vol = 0.012 + rng() * 0.012;
+  const steps = [], p05 = [], p25 = [], p50 = [], p75 = [], p95 = [];
+  for (let t = 0; t <= days; t++) {
+    const s = Math.sqrt(t) * vol;
+    const m = S0 * Math.exp(drift * t);
+    steps.push(t);
+    p50.push(+m.toFixed(2));
+    p05.push(+(m * Math.exp(-1.64 * s)).toFixed(2));
+    p25.push(+(m * Math.exp(-0.67 * s)).toFixed(2));
+    p75.push(+(m * Math.exp(0.67 * s)).toFixed(2));
+    p95.push(+(m * Math.exp(1.64 * s)).toFixed(2));
+  }
+  const predicted_return = +(drift * days).toFixed(4);
+  const lo = -(0.02 + rng() * 0.06), hi = 0.03 + rng() * 0.08;
+  return {
+    ticker: apiTicker, horizon, current_price: +S0.toFixed(2), predicted_return,
+    n_sims, n_jumps_history: 25 + Math.floor(rng() * 45),
+    fan: { steps, p05, p25, p50, p75, p95 },
+    metrics: {
+      p05: +lo.toFixed(4), p95: +hi.toFixed(4),
+      var_95: +(-lo + rng() * 0.02).toFixed(4), cvar_95: +(-lo + 0.03 + rng() * 0.03).toFixed(4),
+      prob_up: +(0.5 + rng() * 0.12).toFixed(4),
+    },
+    summary: `${n_sims.toLocaleString()} Monte-Carlo paths (demo). Over ${horizon}, 90% range [${(lo * 100).toFixed(1)}%, ${(hi * 100).toFixed(1)}%].`,
+  };
+};
+
+// ── /api/signals (cross-sectional long/short board) ───────────────────────────
+export const mockSignals = (horizon = '5d') => {
+  const rng = seedRandom(hashStr('signals:' + horizon));
+  const scored = UNIVERSE.map((m) => ({ m, s: rng() - 0.5 })).sort((a, b) => b.s - a.s);
+  const k = Math.max(1, Math.floor(UNIVERSE.length * 0.2));
+  const mk = (arr, side) => arr.map((x, i) => ({
+    ticker: toApiTicker(x.m.ticker), rank: i + 1, side,
+    score: +x.s.toFixed(4), confidence: +(0.5 + Math.abs(x.s) * 0.45).toFixed(4),
+    company_name: x.m.name, sector: x.m.sector, price: +(200 + rng() * 4000).toFixed(2),
+  }));
+  return {
+    horizon, as_of: new Date().toISOString().slice(0, 10), n_universe: UNIVERSE.length,
+    longs: mk(scored.slice(0, k), 'LONG'),
+    shorts: mk(scored.slice(-k).reverse(), 'SHORT'),
+    summary: `Demo market-neutral board (${horizon}).`,
+  };
+};
+
 // ── /api/optimize_portfolio ───────────────────────────────────────────────────
 export const mockOptimize = ({ tickers, horizon = '20d', risk_tolerance = 1.0 }) => {
   const t = tickers.map((x) => String(x).toUpperCase());

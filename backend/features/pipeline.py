@@ -91,6 +91,37 @@ def add_targets(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ── GARCH Volatility Feature ────────────────────────────────────────────────────
+
+def add_garch_features(df: pd.DataFrame, ticker: str = "") -> pd.DataFrame:
+    """
+    Add a GARCH(1,1) forward-looking conditional-volatility feature.
+
+    All the existing vol features (hvol_*, atr_*, bb_width) are *realized* — they
+    describe vol that already happened. GARCH gives the model a CONDITIONAL
+    forecast of tomorrow's vol (volatility clustering + mean reversion), which is
+    a genuinely predictable signal. We add two columns:
+
+      garch_vol       : annualized GARCH conditional vol (same scale as hvol_*)
+      garch_vol_ratio : GARCH forecast vs 20d realized vol — >1 means the model
+                        expects vol to expand (often precedes large moves)
+
+    Causal: sigma_t uses returns only up to t-1, so no look-ahead is introduced.
+    """
+    from features.garch import conditional_vol_daily
+
+    try:
+        log_ret = np.log(df["close"] / df["close"].shift(1))
+        cond_vol = conditional_vol_daily(log_ret)          # daily, return units
+        df["garch_vol"] = cond_vol * np.sqrt(252)          # annualize to match hvol_*
+        if "hvol_20d" in df.columns:
+            df["garch_vol_ratio"] = df["garch_vol"] / (df["hvol_20d"] + 1e-9)
+    except Exception as e:
+        logger.warning(f"{ticker}: GARCH feature failed ({e}) — skipping")
+
+    return df
+
+
 # ── Macro Feature Integration ──────────────────────────────────────────────────
 
 def add_macro_features(df: pd.DataFrame, macro_df: pd.DataFrame) -> pd.DataFrame:
@@ -315,6 +346,9 @@ def build_features_for_stock(
 
     # Step 1: Technical features
     df = compute_all_features(ohlcv_df.copy(), ticker=ticker)
+
+    # Step 1b: GARCH(1,1) forward-looking volatility (vs the realized vol above)
+    df = add_garch_features(df, ticker=ticker)
 
     # Step 2: Macro
     df = add_macro_features(df, macro_df)

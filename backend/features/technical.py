@@ -104,10 +104,19 @@ def add_trend_features(df: pd.DataFrame) -> pd.DataFrame:
         df["psar_bull"] = psar["PSARl_0.02_0.2"].notna().astype(float)
 
     # Ichimoku Cloud
-    ichimoku = ta.ichimoku(high, low, close)
+    # LEAKAGE GUARD: the Chikou / lagging span (ICS) is close.shift(-kijun) — i.e.
+    # the FUTURE close — and pandas_ta's default `lookahead=True` also shifts the
+    # senkou (cloud) spans forward into the future. Both leak. We disable lookahead
+    # and drop the chikou span so every Ichimoku feature is strictly causal.
+    try:
+        ichimoku = ta.ichimoku(high, low, close, lookahead=False)
+    except TypeError:
+        ichimoku = ta.ichimoku(high, low, close)
     if ichimoku is not None and len(ichimoku) == 2:
         ichi_df = ichimoku[0]
         for col in ichi_df.columns:
+            if col.upper().startswith("ICS"):   # chikou/lagging span = future close → drop
+                continue
             short_name = col.split("_")[0].lower()
             df[f"ichi_{short_name}"] = ichi_df[col]
 

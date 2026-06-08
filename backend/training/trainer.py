@@ -113,9 +113,15 @@ def run_feature_selection(
     df: pd.DataFrame,
     horizon: str,
     top_k: int = 80,
+    fit_df: Optional[pd.DataFrame] = None,
 ) -> Tuple[pd.DataFrame, FeatureSelector]:
     """
     Run feature selection and return filtered DataFrame + fitted selector.
+
+    LEAKAGE GUARD: the selector is *fitted* on `fit_df` (which must exclude the
+    held-out test set) so that variance/correlation/importance ranking never
+    sees future test data. The chosen columns are then applied to the full `df`
+    via transform(). If `fit_df` is None we fall back to fitting on `df`.
     """
     logger.info(f"Running feature selection for horizon={horizon}, top_k={top_k}...")
 
@@ -127,7 +133,7 @@ def run_feature_selection(
     )
 
     target_col = f"target_{horizon}"
-    selector.fit(df, target_col=target_col)
+    selector.fit(df if fit_df is None else fit_df, target_col=target_col)
     df_selected = selector.transform(df)
 
     logger.info(f"Feature selection: {df.shape[1]} → {df_selected.shape[1]} columns")
@@ -311,7 +317,14 @@ def run_training(
     # Feature selection
     selector = None
     if feature_selection:
-        df, selector = run_feature_selection(df, horizon, top_k=top_k_features)
+        # Fit selection on the non-test portion only (train+val) to prevent
+        # look-ahead leakage — the held-out test set must not influence which
+        # features are chosen. The selected columns are then applied to all rows.
+        train_df, val_df, _ = get_train_test_split(df, horizon=horizon)
+        fit_df = pd.concat([train_df, val_df])
+        df, selector = run_feature_selection(
+            df, horizon, top_k=top_k_features, fit_df=fit_df
+        )
         logger.info(f"After feature selection: {df.shape}")
 
     results = {

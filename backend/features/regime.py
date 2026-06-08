@@ -27,7 +27,7 @@ WE FIT ON NIFTY INDEX (not individual stocks):
   volatility to label regimes, then broadcast that label to all 50 stocks.
   Every stock on the same day gets the same regime label.
 """
-4
+
 import logging
 import pickle
 from pathlib import Path

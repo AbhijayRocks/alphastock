@@ -62,9 +62,13 @@ class PredictionDetail(BaseModel):
     direction: str              # "UP" or "DOWN"
     probability: float          # confidence 0.0 to 1.0
     predicted_return: float     # expected return e.g. 0.023 = +2.3%
-    confidence_lower: float     # lower bound of confidence interval
-    confidence_upper: float     # upper bound
+    confidence_lower: float     # lower bound (Monte-Carlo 5th percentile)
+    confidence_upper: float     # upper bound (Monte-Carlo 95th percentile)
     signal_strength: str        # "strong", "moderate", "weak"
+    # Monte-Carlo (Merton jump-diffusion) tail risk — null if unavailable
+    var_95: Optional[float] = None     # 95% Value-at-Risk (loss magnitude)
+    cvar_95: Optional[float] = None    # 95% Conditional VaR / expected shortfall
+    prob_up: Optional[float] = None    # simulated probability of a positive return
 
 
 class PredictResponse(BaseModel):
@@ -102,6 +106,7 @@ class BacktestMetrics(BaseModel):
     max_drawdown: float
     calmar_ratio: float
     n_trades: int
+    avg_exposure: Optional[float] = None   # mean position size under vol targeting
     equity_curve: List[float]
     buyhold_curve: List[float]
     dates: Optional[List[str]]
@@ -158,9 +163,62 @@ class PortfolioOptimizeRequest(BaseModel):
     tickers: List[str] = Field(..., example=["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS"])
     horizon: str = Field(default="20d", example="20d")
     risk_tolerance: float = Field(default=1.0, description="Higher means more risk-seeking", ge=0.1, le=5.0)
+    method: str = Field(
+        default="black_litterman",
+        description="black_litterman (blend views+equilibrium) | hrp (risk parity) | mvo (plain Markowitz)",
+        example="black_litterman",
+    )
 
 class PortfolioOptimizeResponse(BaseModel):
     horizon: str
     risk_tolerance: float
+    method: str = "black_litterman"
     allocations: Dict[str, float]
+    summary: str
+
+
+class SimulateRequest(BaseModel):
+    ticker: str = Field(..., example="RELIANCE_NS")
+    horizon: str = Field(default="20d", example="20d")
+    n_sims: int = Field(default=2000, ge=200, le=20000)
+
+
+class SimulateFan(BaseModel):
+    steps: List[int]
+    p05: List[float]
+    p25: List[float]
+    p50: List[float]
+    p75: List[float]
+    p95: List[float]
+
+
+class SimulateResponse(BaseModel):
+    ticker: str
+    horizon: str
+    current_price: float
+    predicted_return: float
+    n_sims: int
+    n_jumps_history: int          # how many historical jumps calibrated the model
+    fan: SimulateFan              # Monte-Carlo price percentile cone
+    metrics: Dict[str, float]     # p05/p95/var_95/cvar_95/prob_up/...
+    summary: str
+
+
+class SignalItem(BaseModel):
+    ticker: str
+    rank: int
+    side: str                     # "LONG" or "SHORT"
+    score: float                  # cross-sectional rank score
+    confidence: float             # meta-label confidence (0..1)
+    company_name: Optional[str] = None
+    sector: Optional[str] = None
+    price: Optional[float] = None
+
+
+class SignalsResponse(BaseModel):
+    horizon: str
+    as_of: str                    # date the board was computed for
+    n_universe: int
+    longs: List[SignalItem]
+    shorts: List[SignalItem]
     summary: str

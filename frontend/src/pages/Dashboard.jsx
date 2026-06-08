@@ -447,6 +447,11 @@ const Dashboard = () => {
         />
       </motion.div>
 
+      {/* Cross-sectional market-neutral signals */}
+      <motion.div {...fadeUp}>
+        <SignalsBoard horizon={horizon} />
+      </motion.div>
+
       {/* Watchlist + System */}
       <motion.div {...fadeUp} className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2"><WatchlistFocus horizon={horizon} /></div>
@@ -489,6 +494,67 @@ const Dashboard = () => {
         </Card>
       </motion.div>
     </div>
+  );
+};
+
+// ── Cross-sectional long/short signal board ──────────────────────────────────
+const SignalsBoard = ({ horizon }) => {
+  const { data, loading } = useApi(() => api.signals(horizon), [horizon]);
+  const longs = data?.longs || [];
+  const shorts = data?.shorts || [];
+
+  const Col = ({ title, items, tone }) => (
+    <div>
+      <div className={cn('text-2xs font-semibold uppercase tracking-wider mb-2',
+        tone === 'bull' ? 'text-bull' : 'text-bear')}>{title}</div>
+      <div className="space-y-1">
+        {items.slice(0, 8).map((s) => {
+          const display = toDisplayTicker(s.ticker);
+          return (
+            <Link key={s.ticker} to={`/analysis?ticker=${encodeURIComponent(display)}&horizon=${horizon}`}
+              className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-md hover:bg-bg-2 transition-colors group">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-2xs font-mono text-ink-5 w-4 tabular">{s.rank}</span>
+                <span className="text-xs font-semibold text-ink-1 truncate group-hover:text-alpha transition-colors">{tickerSymbol(display)}</span>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="text-2xs text-ink-4 tabular">{Math.round((s.confidence || 0) * 100)}%</span>
+                <span className="inline-block w-10 h-1 rounded-full bg-bg-3 overflow-hidden">
+                  <span className={cn('block h-full', tone === 'bull' ? 'bg-bull' : 'bg-bear')}
+                    style={{ width: `${Math.round((s.confidence || 0) * 100)}%` }} />
+                </span>
+              </div>
+            </Link>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  return (
+    <Card>
+      <CardHeader
+        eyebrow="Cross-Sectional · Market-Neutral"
+        title="Long / Short Signals"
+        subtitle={data ? `Quant ranking model · as of ${data.as_of} · ${horizon}` : 'Quant ranking model (rank + meta-labeling)'}
+        action={<Pill>{(longs.length + shorts.length) || '—'} names</Pill>}
+      />
+      <CardBody>
+        {loading && !data ? (
+          <Skeleton className="h-40 w-full" />
+        ) : (longs.length || shorts.length) ? (
+          <>
+            <div className="grid grid-cols-2 gap-5">
+              <Col title="▲ Long (top rank)" items={longs} tone="bull" />
+              <Col title="▼ Short (bottom rank)" items={shorts} tone="bear" />
+            </div>
+            <div className="text-2xs text-ink-5 mt-3">Bars = meta-label confidence. Market-neutral: long the top, short the bottom.</div>
+          </>
+        ) : (
+          <EmptyState title="No signals yet" description="Train the cross-sectional model to populate this board." />
+        )}
+      </CardBody>
+    </Card>
   );
 };
 

@@ -23,11 +23,14 @@ AlphaStock turns a decade of NSE market history into clear, explainable analytic
 
 ## ✨ Features
 
-- **Multi-horizon forecasts** — direction (UP/DOWN), expected return, probability, and a confidence interval across **1-day**, **5-day**, and **20-day** horizons, with a `strong / moderate / weak` signal strength.
-- **Factor attribution** — every forecast ships with the key factors driving it, ranked by contribution, plus a plain-English thesis. Full transparency, no black boxes.
-- **Market regime** — automatic Bull / Bear / Sideways / Crisis detection that maps to an actionable desk stance (Risk-On / Neutral / Risk-Off / Defensive).
-- **Portfolio optimizer** — mean-variance (Markowitz) allocation with dynamic conditional covariance and a configurable risk multiplier, returning per-asset weights, sector breakdown, and a written summary.
-- **Walk-forward backtest** — time-series-aware splits vs. a buy-and-hold benchmark, reporting Sharpe, Calmar, max drawdown, hit rate, and excess return.
+- **Multi-horizon forecasts** — direction (UP/DOWN), expected return, probability, and a confidence interval across **1-day**, **5-day**, and **20-day** horizons, with a `strong / moderate / weak` signal strength. Each stock gets an ensemble of LightGBM/XGBoost regressors and classifiers.
+- **GARCH volatility & honest prediction bands** — a dependency-free GARCH(1,1) supplies conditional volatility for forward-looking risk, calibrated confidence bands, and volatility-targeted position sizing.
+- **Monte-Carlo risk (Merton jump-diffusion)** — thousands of simulated paths that include sudden gaps/crashes give **fat-tailed prediction bands, Value-at-Risk (VaR), Expected Shortfall (CVaR)**, and a price "fan chart" — true tail-risk, not a thin Gaussian.
+- **Cross-sectional long/short signals** — a market-neutral ranking model (learning-to-rank + meta-labeling on triple-barrier labels) produces a daily **LONG / SHORT board**, validated with Information Coefficient and **Deflated Sharpe** (multiple-testing-aware).
+- **Factor attribution (real SHAP)** — every forecast ships with native TreeSHAP contributions (signed, push-UP vs push-DOWN) plus a plain-English thesis. Full transparency, no black boxes.
+- **Market regime** — automatic Bull / Bear / Sideways / Crisis detection (Hidden Markov Model) that maps to an actionable desk stance.
+- **Robust portfolio optimizer** — **Black-Litterman** (blends model views with index-weight equilibrium), **Hierarchical Risk Parity**, and classic mean-variance — all on a **Ledoit-Wolf-shrunk GARCH covariance** with a position cap.
+- **Walk-forward backtest** — time-series-aware splits vs. a buy-and-hold benchmark, after **realistic NSE transaction costs**, reporting Sharpe, Calmar, max drawdown, hit rate, and excess return.
 - **Market screener** — filter and sort the full NIFTY 50 by direction, strength, sector, and expected return, with CSV export.
 - **Accounts & personalization** — JWT sign-in, per-user watchlist and preferences (SQLite by default, Postgres-ready).
 - **Premium UX** — consistent green/red/neutral P&L system, animated charts, command palette (`⌘K`), keyboard navigation, and responsive layouts.
@@ -45,10 +48,10 @@ alpha_stock/
 │   │   ├── model_registry.py    # Model loading, prediction, attribution, backtest
 │   │   └── schemas.py           # Pydantic request/response models
 │   ├── auth/                    # Accounts: JWT, password hashing, SQLAlchemy models
-│   ├── models/                  # ML model definitions (classifier, ensemble, portfolio, …)
-│   ├── features/                # Feature engineering (technical, regime, selection)
+│   ├── models/                  # ML models: classifier, ensemble, portfolio, montecarlo
+│   ├── features/                # Feature engineering: technical, garch, regime, selection
 │   ├── data_pipeline/           # yFinance ingestion, NIFTY 50 universe, news sentiment
-│   ├── training/                # Training loop + backtest engine
+│   ├── training/                # trainer, backtest, costs, validation, cross_sectional, labeling
 │   ├── config.py                # Central config — HOST / PORT / RELOAD are env-driven
 │   ├── requirements.txt
 │   └── .env.example
@@ -175,10 +178,12 @@ All routes are prefixed with `/api`; interactive Swagger lives at `/docs`.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/api/predict` | Directional forecast with probability, expected return, and confidence interval |
-| `POST` | `/api/explain` | Top factor attribution + plain-English interpretation |
-| `POST` | `/api/backtest` | Walk-forward strategy simulation vs. buy-and-hold |
-| `POST` | `/api/optimize_portfolio` | Mean-variance allocation with risk tolerance |
+| `POST` | `/api/predict` | Directional forecast + probability, expected return, GARCH/Monte-Carlo bands, VaR/CVaR |
+| `POST` | `/api/explain` | Native-SHAP factor attribution + plain-English interpretation |
+| `POST` | `/api/backtest` | Walk-forward strategy simulation (realistic costs, vol-targeting) vs. buy-and-hold |
+| `POST` | `/api/simulate` | Monte-Carlo (Merton jump-diffusion) price fan + tail-risk metrics |
+| `POST` | `/api/optimize_portfolio` | Black-Litterman / HRP / mean-variance allocation (`method=`) |
+| `GET` | `/api/signals` | Cross-sectional market-neutral long/short board (`horizon=`) |
 | `GET` | `/api/models` | Stocks with trained models, sectors, and accuracy |
 | `GET` | `/api/prices` | Current prices and 1-day % change |
 | `GET` | `/api/history/{ticker}` | Historical closing prices (configurable `days`) |
@@ -205,6 +210,19 @@ npm run preview    # serve the build locally on VITE_PORT
 ```
 
 Serve `frontend/dist` from any static host (or behind the same origin as the API) and run the backend with a production `ALPHASTOCK_SECRET` and `PORT`.
+
+---
+
+## 📚 Documentation
+
+| Doc | What's inside |
+|---|---|
+| [`PlatformOverview.pdf`](PlatformOverview.pdf) | Plain-language guide to every feature — written for market professionals (no AI background needed) |
+| [`PROJECT_STATE.md`](PROJECT_STATE.md) | Full system state: what's live, architecture, API surface, environment notes |
+| [`QUANT_ROADMAP.md`](QUANT_ROADMAP.md) | Quant research track — trust harness, cross-sectional model results, roadmap |
+| [`SETUP.md`](SETUP.md) | Environment, data ingestion, GPU/CUDA, model training, Postgres |
+
+> **Methodology note:** the platform is built with a "don't fool yourself" discipline — realistic transaction costs, time-series-aware validation, and a **Deflated Sharpe** check that penalizes multiple-testing. During development this harness caught and removed a real look-ahead leak; the published cross-sectional results are leak-free and honestly measured.
 
 ---
 

@@ -32,10 +32,15 @@ from api.schemas import (
     BacktestRequest, BacktestResponse, BacktestMetrics,
     ModelsResponse, ModelInfo, HealthResponse,
     PricesResponse, HistoryResponse,
-    PortfolioOptimizeRequest, PortfolioOptimizeResponse
+    PortfolioOptimizeRequest, PortfolioOptimizeResponse,
+    SimulateRequest, SimulateResponse, SimulateFan,
+    SignalsResponse, SignalItem,
 )
 from api.model_registry import ModelRegistry
-from models.portfolio import optimize_portfolio, estimate_garch_covariance
+from models.portfolio import (
+    optimize_portfolio, estimate_garch_covariance,
+    shrink_covariance, hierarchical_risk_parity, black_litterman_returns,
+)
 import pandas as pd
 from config import LOG_LEVEL
 
@@ -122,6 +127,9 @@ async def predict(request: PredictRequest):
             confidence_lower = round(result.get("confidence_lower", 0.0), 4),
             confidence_upper = round(result.get("confidence_upper", 0.0), 4),
             signal_strength  = signal_strength,
+            var_95           = result.get("var_95"),
+            cvar_95          = result.get("cvar_95"),
+            prob_up          = result.get("prob_up"),
         ),
         regime       = result.get("regime", "unknown"),
         model_used   = model_id,
@@ -163,13 +171,15 @@ async def explain(request: ExplainRequest):
         for f in shap_result["top_features"]
     ]
 
-    # Build plain-English interpretation
-    top3 = [f.feature for f in features[:3]]
-    direction = "upward" if shap_result.get("net_direction", 0) > 0 else "downward"
+    # Build plain-English interpretation. Now that SHAP gives real signs, cite the
+    # drivers that actually push in the net direction (not just the largest by size).
+    bias_up   = shap_result.get("net_direction", 0) > 0
+    direction = "upward" if bias_up else "downward"
+    want      = "positive" if bias_up else "negative"
+    drivers   = [f.feature for f in features if f.direction == want][:3] or [f.feature for f in features[:3]]
     interpretation = (
-        f"The model is biased {direction} primarily due to: "
-        f"{', '.join(top3)}. "
-        f"These features had the largest influence on this prediction."
+        f"The model leans {direction}, driven mainly by: {', '.join(drivers)}. "
+        f"These features pushed the prediction {direction} the hardest."
     )
 
     return ExplainResponse(
@@ -233,6 +243,88 @@ async def backtest(request: BacktestRequest):
         horizon = horizon,
         metrics = BacktestMetrics(**metrics),
         summary = summary,
+    )
+
+
+# ── Cross-sectional Long/Short Signals ──────────────────────────────────────────
+
+@router.get("/signals", response_model=SignalsResponse)
+async def signals(horizon: str = "5d"):
+    """
+    Market-neutral long/short board from the cross-sectional ranking model
+    (rank + meta-labeling). Top quintile = LONG, bottom = SHORT, as of the latest
+    data, with rank score and meta confidence per name.
+    """
+    _check_registry()
+    if horizon not in ["1d", "5d", "20d"]:
+        raise HTTPException(status_code=400, detail=f"Invalid horizon '{horizon}'")
+
+    try:
+        sig = registry.cross_sectional_signals(horizon)
+    except Exception as e:
+        # Model not trained yet / unavailable → 503 so the frontend can fall back
+        logger.warning(f"Signals unavailable for {horizon}: {e}")
+        raise HTTPException(status_code=503, detail=f"Cross-sectional signals unavailable: {e}")
+
+    summary = (
+        f"Market-neutral board as of {sig['as_of']} ({horizon}): "
+        f"long {len(sig['longs'])} / short {len(sig['shorts'])} of {sig['n_universe']} names. "
+        f"Ranked by the cross-sectional model and sized by meta-label confidence."
+    )
+    return SignalsResponse(
+        horizon=sig["horizon"], as_of=sig["as_of"], n_universe=sig["n_universe"],
+        longs=[SignalItem(**s) for s in sig["longs"]],
+        shorts=[SignalItem(**s) for s in sig["shorts"]],
+        summary=summary,
+    )
+
+
+# ── Monte Carlo Simulation ──────────────────────────────────────────────────────
+
+@router.post("/simulate", response_model=SimulateResponse)
+async def simulate(request: SimulateRequest):
+    """
+    Monte-Carlo a Merton jump-diffusion forward-price distribution.
+
+    Returns a percentile "fan" of simulated price paths (for the fan chart) plus
+    tail-risk metrics (VaR, CVaR, P(up)). The simulation is centered on the ML
+    predicted return, uses the GARCH conditional vol for diffusion, and adds
+    historically-calibrated jumps for realistic gap/crash risk.
+    """
+    _check_registry()
+
+    ticker  = request.ticker.upper()
+    horizon = request.horizon
+
+    if ticker not in registry.available_tickers:
+        raise HTTPException(status_code=404, detail=f"No model for {ticker}")
+    if horizon not in ["1d", "5d", "20d"]:
+        raise HTTPException(status_code=400, detail=f"Invalid horizon '{horizon}'")
+
+    try:
+        sim = registry.simulate(ticker, horizon, n_sims=request.n_sims)
+    except Exception as e:
+        logger.error(f"Simulation failed for {ticker}/{horizon}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    m = sim["metrics"]
+    summary = (
+        f"{sim['n_sims']:,} Monte-Carlo paths (Merton jump-diffusion, "
+        f"{sim['n_jumps_history']} historical jumps). Over {horizon}, the 90% "
+        f"range is [{m['p05']:+.1%}, {m['p95']:+.1%}] with {m['prob_up']:.0%} "
+        f"probability of a gain; 95% VaR {m['var_95']:.1%}, CVaR {m['cvar_95']:.1%}."
+    )
+
+    return SimulateResponse(
+        ticker           = ticker,
+        horizon          = horizon,
+        current_price    = sim["current_price"],
+        predicted_return = sim["predicted_return"],
+        n_sims           = sim["n_sims"],
+        n_jumps_history  = sim["n_jumps_history"],
+        fan              = SimulateFan(**sim["fan"]),
+        metrics          = m,
+        summary          = summary,
     )
 
 
@@ -328,36 +420,68 @@ async def optimize_portfolio_route(request: PortfolioOptimizeRequest):
             # Get expected return from model
             pred = registry.predict(ticker, request.horizon)
             expected_returns[ticker] = pred.get("predicted_return", 0.0)
-            
-            # Get history for covariance matrix (last 100 days)
-            hist = registry.get_history(ticker, days=100)
+
+            # Get history for covariance matrix. ~250 trading days gives GARCH(1,1)
+            # enough sample to fit (it needs 100+ obs) for a stable covariance.
+            hist = registry.get_history(ticker, days=250)
             if hist:
-                histories[ticker] = [pt["price"] for pt in hist]
-        
+                histories[ticker] = pd.Series(
+                    {pt["date"]: pt["price"] for pt in hist}, name=ticker
+                )
+
         if not expected_returns or not histories:
             raise ValueError("Failed to gather predictions or history")
-            
-        er_series = pd.Series(expected_returns)
-        
-        # Build price dataframe and compute daily returns
-        price_df = pd.DataFrame(histories)
-        returns_df = price_df.pct_change().dropna()
-        
-        # Estimate conditional covariance matrix using CCC-GARCH
-        cov_matrix = estimate_garch_covariance(returns_df) 
-        
-        allocations = optimize_portfolio(er_series, cov_matrix, risk_tolerance=request.risk_tolerance)
-        
-        # Create plain English summary
+
+        # Build a date-aligned price frame. Tickers can have different history
+        # lengths/dates, so we align on the date index (outer join) instead of
+        # assuming equal-length lists (which would raise a ValueError) and avoid
+        # mixing returns from mismatched calendar dates.
+        price_df = pd.DataFrame(histories).sort_index().ffill().dropna(how="any")
+        returns_df = price_df.pct_change().dropna(how="any")
+
+        if returns_df.shape[0] < 2 or returns_df.shape[1] == 0:
+            raise ValueError("Not enough overlapping price history to optimize")
+
+        # GARCH conditional covariance, then SHRINK it for stability (Tier 3).
+        cov_matrix = estimate_garch_covariance(returns_df)
+        cov_matrix = shrink_covariance(cov_matrix, returns_df)
+
+        er_series = pd.Series(expected_returns).reindex(cov_matrix.columns).fillna(0.0)
+
+        # Choose the allocation method (robust default = Black-Litterman)
+        method = (request.method or "black_litterman").lower()
+        if method == "hrp":
+            allocations = hierarchical_risk_parity(cov_matrix)
+            method_label = "Hierarchical Risk Parity (diversification-first)"
+        elif method == "mvo":
+            allocations = optimize_portfolio(er_series, cov_matrix,
+                                             risk_tolerance=request.risk_tolerance)
+            method_label = "Mean-Variance Optimization"
+        else:  # black_litterman
+            from data_pipeline.nifty50 import NIFTY50_META
+            mkt = {}
+            for t in cov_matrix.columns:
+                sym = t.replace("_NS", ".NS").replace("M_M", "M&M")
+                meta = NIFTY50_META.get(sym)
+                mkt[t] = meta.nifty_weight if meta else 1.0
+            bl_returns = black_litterman_returns(cov_matrix, mkt, er_series.to_dict(),
+                                                 view_confidence=request.risk_tolerance)
+            allocations = optimize_portfolio(bl_returns, cov_matrix,
+                                             risk_tolerance=request.risk_tolerance)
+            method = "black_litterman"
+            method_label = "Black-Litterman (model views blended with market equilibrium)"
+
         top_allocation = max(allocations.items(), key=lambda x: x[1])
         summary = (
-            f"Optimized allocation for {len(valid_tickers)} assets over a {request.horizon} horizon. "
-            f"The largest recommended weighting is {top_allocation[1]:.1%} in {top_allocation[0]}."
+            f"Optimized {len(valid_tickers)} assets over a {request.horizon} horizon using "
+            f"{method_label}, on a shrunk GARCH covariance with a 40% position cap. "
+            f"Largest weighting: {top_allocation[1]:.1%} in {top_allocation[0]}."
         )
-        
+
         return PortfolioOptimizeResponse(
             horizon=request.horizon,
             risk_tolerance=request.risk_tolerance,
+            method=method,
             allocations=allocations,
             summary=summary
         )

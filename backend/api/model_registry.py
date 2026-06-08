@@ -19,6 +19,8 @@ WHAT IT DOES:
 import logging
 import json
 import pickle
+import time
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -49,6 +51,27 @@ class ModelRegistry:
         self._regime_cache: Dict = {}   # cached regime info
         self.available_tickers: set = set()
         self.total_models_loaded: int = 0
+
+        # Live price cache — refreshed from yfinance so the dashboard shows
+        # today's market data instead of the last-ingested close. Refreshes run
+        # in a background thread once the cache is stale, so requests are always
+        # served instantly from cache (never blocked on a slow yfinance call).
+        self._price_cache: Dict[str, Dict[str, float]] = {}
+        self._price_cache_ts: float = 0.0
+        self._price_cache_ttl: float = 120.0   # seconds
+        self._price_lock = threading.Lock()
+        self._price_refreshing: bool = False
+
+        # GARCH 1-day conditional-vol forecast per ticker (return units), cached
+        # because fitting GARCH(1,1) costs ~50-200ms. Used for prediction bands.
+        self._garch_vol_1d: Dict[str, Optional[float]] = {}
+
+        # Merton jump-diffusion parameters per ticker (calibrated once, cached).
+        # Used by the Monte-Carlo risk layer for fat-tailed bands + VaR/CVaR.
+        self._merton_params: Dict[str, Optional[Dict]] = {}
+
+        # Cross-sectional long/short signal board cache {horizon: (ts, result)}.
+        self._signals_cache: Dict[str, tuple] = {}
 
     def load_all(self) -> None:
         """
@@ -146,6 +169,20 @@ class ModelRegistry:
         self.total_models_loaded = loaded
         logger.info(f"Registry loaded: {len(self.available_tickers)} stocks, "
                     f"{loaded} models total")
+
+        # Warm the live-price cache in the background so the first /prices request
+        # is served instantly with real market data (works even with 0 models).
+        self._refresh_prices_async()
+
+        # Warm the cross-sectional signal board too (panel build ~20s) so the first
+        # /signals request doesn't block. Best-effort; ignored if no model trained.
+        def _warm_signals():
+            for hz in ("5d", "1d", "20d"):
+                try:
+                    self.cross_sectional_signals(hz)
+                except Exception:
+                    pass
+        threading.Thread(target=_warm_signals, daemon=True).start()
 
     # ── Model Loaders ──────────────────────────────────────────────────────────
 
@@ -273,6 +310,97 @@ class ModelRegistry:
                 f.write(f"load regime error: {e}\n{traceback.format_exc()}\n")
             self._regime_model = None
 
+    # ── Feature Alignment & Ensemble Evaluation ─────────────────────────────────
+
+    def _align_features(self, rows: pd.DataFrame, feature_names: List[str]) -> np.ndarray:
+        """
+        Align one or more feature rows to exactly the columns a model expects.
+        Missing columns are filled with 0.0; NaN/inf are scrubbed.
+        Works for a single latest row or a full batch (e.g. a backtest test set).
+        """
+        aligned = pd.DataFrame(index=rows.index, columns=feature_names)
+        for col in feature_names:
+            if col in rows.columns:
+                aligned[col] = rows[col]
+            else:
+                aligned[col] = 0.0
+        X = aligned.values.astype(np.float32)
+        return np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
+    def _predict_member_proba(
+        self, ticker: str, horizon: str, model_name: str, rows: pd.DataFrame
+    ) -> Optional[np.ndarray]:
+        """
+        Batch UP-probabilities for a single classifier member, aligned to that
+        member's own trained feature set. Returns an array (len == len(rows)) or None.
+        """
+        bundle = self._models.get(ticker, {}).get(horizon, {}).get(model_name)
+        if bundle is None:
+            return None
+
+        mtype  = bundle.get("type", "")
+        meta   = bundle.get("meta", {})
+        fnames = meta.get("feature_names", list(rows.columns))
+        X      = self._align_features(rows, fnames)
+
+        try:
+            if mtype == "lgbm_clf":
+                return np.asarray(bundle["model"].predict(X), dtype=float)
+            elif mtype == "xgb_clf":
+                import xgboost as xgb
+                dmatrix = xgb.DMatrix(pd.DataFrame(X, columns=fnames))
+                return np.asarray(bundle["model"].predict(dmatrix), dtype=float)
+        except Exception as e:
+            logger.warning(f"Member predict failed ({model_name}): {e}")
+        return None
+
+    def _predict_ensemble_proba(
+        self, ticker: str, horizon: str, rows: pd.DataFrame
+    ) -> Optional[np.ndarray]:
+        """
+        Actually evaluate the classification ensemble: run each member model,
+        then combine with the saved weights (or the stacking meta-learner).
+        Returns an array of UP-probabilities (len == len(rows)) or None.
+        """
+        bundle = self._models.get(ticker, {}).get(horizon, {}).get("ensemble_clf")
+        if bundle is None:
+            return None
+
+        data       = bundle.get("ensemble_data", {})
+        members    = data.get("model_names", []) or []
+        weights    = data.get("weights", {}) or {}
+        strategy   = data.get("strategy", "weighted")
+        meta_model = data.get("meta_model")
+
+        # Collect each member's predictions on these rows
+        preds = {}
+        for m in members:
+            p = self._predict_member_proba(ticker, horizon, m, rows)
+            if p is not None:
+                preds[m] = p
+
+        if not preds:
+            return None
+
+        # Stacking: feed member probabilities into the fitted meta-learner
+        if strategy == "stacking" and meta_model is not None:
+            try:
+                X_stack = np.column_stack([preds[m] for m in members if m in preds])
+                return meta_model.predict_proba(X_stack)[:, 1]
+            except Exception as e:
+                logger.warning(f"Stacking meta-model failed, averaging instead: {e}")
+
+        # Weighted (or simple) average, normalized over the members that ran
+        out   = np.zeros(len(next(iter(preds.values()))), dtype=float)
+        total = 0.0
+        for m, p in preds.items():
+            w = weights.get(m, 1.0 / len(preds))
+            out   += w * p
+            total += w
+        if total > 0:
+            out /= total
+        return out
+
     # ── Prediction ─────────────────────────────────────────────────────────────
 
     def predict(self, ticker: str, horizon: str, model_name: str = "ensemble_clf") -> Dict:
@@ -300,36 +428,38 @@ class ModelRegistry:
         if model_bundle is None:
             raise ValueError(f"No model found for {ticker}/{horizon}")
 
-        # Get feature names from model metadata
-        meta          = model_bundle.get("meta", {})
-        feature_names = meta.get("feature_names", list(feature_df.columns))
-
-        # Align features to exactly what the model expects
+        # Predict UP-probability for the latest row
         latest_row = feature_df.iloc[-1:]
-        X_aligned = pd.DataFrame(index=latest_row.index, columns=feature_names)
-        for col in feature_names:
-            if col in latest_row.columns:
-                X_aligned[col] = latest_row[col]
-            else:
-                X_aligned[col] = 0.0
-        X_latest = X_aligned.values.astype(np.float32)
 
-        # Replace NaN/inf
-        X_latest = np.nan_to_num(X_latest, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # Run prediction
-        prob = self._run_model_predict(model_bundle, X_latest, model_name, feature_names)
+        if model_bundle.get("type") == "ensemble":
+            # Actually evaluate the ensemble (run members + combine), not a 0.5 stub
+            ens = self._predict_ensemble_proba(ticker, horizon, latest_row)
+            prob = float(ens[-1]) if ens is not None else 0.5
+        else:
+            meta          = model_bundle.get("meta", {})
+            feature_names = meta.get("feature_names", list(feature_df.columns))
+            X_latest      = self._align_features(latest_row, feature_names)
+            prob          = self._run_model_predict(model_bundle, X_latest, model_name, feature_names)
 
         # Get current price
         current_price = self._get_current_price(ticker)
 
         # Expected return from regression model (if available)
-        predicted_return = self._get_regression_prediction(ticker, horizon, X_latest, feature_names)
+        predicted_return = self._get_regression_prediction(ticker, horizon)
 
-        # Confidence interval
-        margin = abs(predicted_return) * 0.3 + 0.005
-        lower  = predicted_return - margin
-        upper  = predicted_return + margin
+        # Confidence band + tail risk. Preferred: Monte-Carlo Merton jump-diffusion
+        # (fat-tailed, asymmetric, with VaR/CVaR). Fallbacks: GARCH normal band,
+        # then a crude heuristic.
+        mc = self._montecarlo_risk(ticker, horizon, predicted_return)
+        var_95 = cvar_95 = prob_up = None
+        if mc is not None:
+            lower, upper = mc["p05"], mc["p95"]
+            var_95, cvar_95, prob_up = mc["var_95"], mc["cvar_95"], mc["prob_up"]
+        else:
+            sigma_h = self._garch_band(ticker, horizon)
+            margin = 1.645 * sigma_h if sigma_h is not None else abs(predicted_return) * 0.3 + 0.005
+            lower  = predicted_return - margin
+            upper  = predicted_return + margin
 
         # Regime
         regime = self._regime_cache.get("regime", "unknown")
@@ -339,6 +469,9 @@ class ModelRegistry:
             "predicted_return":  float(predicted_return),
             "confidence_lower":  float(lower),
             "confidence_upper":  float(upper),
+            "var_95":            var_95,
+            "cvar_95":           cvar_95,
+            "prob_up":           prob_up,
             "current_price":     float(current_price),
             "regime":            regime,
         }
@@ -380,29 +513,18 @@ class ModelRegistry:
             logger.warning(f"Model predict failed ({model_type}): {e}")
             return 0.5
 
-    def _get_regression_prediction(
-        self, ticker: str, horizon: str,
-        X: np.ndarray, feature_names: List[str]
-    ) -> float:
+    def _get_regression_prediction(self, ticker: str, horizon: str) -> float:
         """Get regression model prediction for expected return."""
+        feature_df = self._features[ticker]
         for reg_model_name in ["lightgbm", "xgboost"]:
             reg_bundle = self._models.get(ticker, {}).get(horizon, {}).get(reg_model_name)
             if reg_bundle is None:
                 continue
             try:
                 reg_meta          = reg_bundle.get("meta", {})
-                reg_feature_names = reg_meta.get("feature_names", feature_names)
-                feature_df        = self._features[ticker]
-                
-                latest_row_reg = feature_df.iloc[-1:]
-                X_reg_aligned = pd.DataFrame(index=latest_row_reg.index, columns=reg_feature_names)
-                for col in reg_feature_names:
-                    if col in latest_row_reg.columns:
-                        X_reg_aligned[col] = latest_row_reg[col]
-                    else:
-                        X_reg_aligned[col] = 0.0
-                X_reg = X_reg_aligned.values.astype(np.float32)
-                X_reg = np.nan_to_num(X_reg, nan=0.0, posinf=0.0, neginf=0.0)
+                reg_feature_names = reg_meta.get("feature_names", list(feature_df.columns))
+
+                X_reg = self._align_features(feature_df.iloc[-1:], reg_feature_names)
 
                 if reg_bundle["type"] == "lgbm":
                     pred = reg_bundle["model"].predict(X_reg)[0]
@@ -420,7 +542,11 @@ class ModelRegistry:
         return 0.0
 
     def _get_current_price(self, ticker: str) -> float:
-        """Get the most recent close price for a ticker."""
+        """Get the latest market price for a ticker (live, with stored fallback)."""
+        live = self._fetch_live_prices()
+        if ticker in live:
+            return float(live[ticker]["price"])
+        # Fallback: last close from the stored feature parquet
         try:
             feature_df = self._features.get(ticker)
             if feature_df is not None and "close" in feature_df.columns:
@@ -429,42 +555,249 @@ class ModelRegistry:
             pass
         return 0.0
 
+    def _garch_band(self, ticker: str, horizon: str) -> Optional[float]:
+        """
+        GARCH(1,1) volatility forecast (return units) over the horizon, used for
+        prediction intervals. The 1-day forecast is fit once per ticker and
+        cached; horizon scaling is sqrt-of-time. Returns None if unavailable.
+        """
+        if ticker not in self._garch_vol_1d:
+            sigma_1d = None
+            try:
+                feature_df = self._features.get(ticker)
+                if feature_df is not None and "close" in feature_df.columns:
+                    from features.garch import forecast_vol
+                    log_ret = np.log(feature_df["close"] / feature_df["close"].shift(1))
+                    sigma_1d = forecast_vol(log_ret, horizon_days=1)
+            except Exception as e:
+                logger.debug(f"GARCH band failed for {ticker}: {e}")
+            self._garch_vol_1d[ticker] = sigma_1d
+
+        sigma_1d = self._garch_vol_1d[ticker]
+        if sigma_1d is None:
+            return None
+        horizon_days = {"1d": 1, "5d": 5, "20d": 20}.get(horizon, 1)
+        return float(sigma_1d) * np.sqrt(horizon_days)
+
+    # ── Monte Carlo (Merton jump-diffusion) risk layer ──────────────────────────
+
+    def _merton_calibrate(self, ticker: str) -> Optional[Dict]:
+        """Calibrate (and cache) Merton jump-diffusion params from price history."""
+        if ticker not in self._merton_params:
+            params = None
+            try:
+                feature_df = self._features.get(ticker)
+                if feature_df is not None and "close" in feature_df.columns:
+                    from models.montecarlo import calibrate_merton
+                    log_ret = np.log(feature_df["close"] / feature_df["close"].shift(1)).dropna()
+                    params = calibrate_merton(log_ret.values)
+            except Exception as e:
+                logger.debug(f"Merton calibration failed for {ticker}: {e}")
+            self._merton_params[ticker] = params
+        return self._merton_params[ticker]
+
+    def _montecarlo_risk(self, ticker: str, horizon: str, predicted_return: float) -> Optional[Dict]:
+        """
+        Monte-Carlo a Merton jump-diffusion forward-return distribution centered on
+        the ML prediction, using the GARCH vol for diffusion. Returns risk metrics
+        (fat-tailed band p05/p95, VaR/CVaR, P(up)) or None.
+        """
+        params = self._merton_calibrate(ticker)
+        if params is None:
+            return None
+        try:
+            from models.montecarlo import simulate_terminal_returns, risk_metrics
+            horizon_days = {"1d": 1, "5d": 5, "20d": 20}.get(horizon, 1)
+            sigma_1d = self._garch_band(ticker, "1d")    # daily GARCH vol for diffusion
+            rets = simulate_terminal_returns(
+                predicted_return, horizon_days, params,
+                diffusion_sigma_daily=sigma_1d, n_sims=10_000,
+            )
+            return risk_metrics(rets)
+        except Exception as e:
+            logger.debug(f"Monte Carlo risk failed for {ticker}: {e}")
+            return None
+
+    def simulate(self, ticker: str, horizon: str, n_sims: int = 2_000) -> Dict:
+        """
+        Build a Monte-Carlo price fan (percentile cone) for the analysis chart,
+        plus the terminal risk metrics. Uses live price as the starting point.
+        """
+        params = self._merton_calibrate(ticker)
+        if params is None:
+            raise ValueError(f"Cannot calibrate Monte Carlo model for {ticker}")
+
+        from models.montecarlo import simulate_price_fan, simulate_terminal_returns, risk_metrics
+
+        horizon_days     = {"1d": 1, "5d": 5, "20d": 20}.get(horizon, 1)
+        current_price    = self._get_current_price(ticker)
+        predicted_return = self._get_regression_prediction(ticker, horizon)
+        sigma_1d         = self._garch_band(ticker, "1d")
+
+        fan = simulate_price_fan(
+            current_price, predicted_return, horizon_days, params,
+            diffusion_sigma_daily=sigma_1d, n_sims=n_sims,
+        )
+        rets    = simulate_terminal_returns(predicted_return, horizon_days, params,
+                                            diffusion_sigma_daily=sigma_1d, n_sims=10_000)
+        metrics = risk_metrics(rets)
+
+        return {
+            "ticker":           ticker,
+            "horizon":          horizon,
+            "current_price":    float(current_price),
+            "predicted_return": float(predicted_return),
+            "n_sims":           n_sims,
+            "n_jumps_history":  int(params.get("n_jumps", 0)),
+            "fan":              fan,
+            "metrics":          metrics,
+        }
+
+    # ── Live Prices ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _to_yf_symbol(ticker: str) -> str:
+        """Convert a file-stem ticker (e.g. RELIANCE_NS) to a yfinance symbol."""
+        return ticker.replace("_NS", ".NS").replace("M_M", "M&M")
+
+    @staticmethod
+    def _to_stem(symbol: str) -> str:
+        """Convert a yfinance symbol (e.g. M&M.NS) to a file-stem ticker (M_M_NS)."""
+        return symbol.replace(".", "_").replace("&", "_").replace("^", "")
+
+    def _price_universe(self) -> Dict[str, str]:
+        """
+        {yfinance_symbol: file_stem} for the prices we serve. Prefer the trained
+        tickers; if none are trained yet, fall back to the full Nifty-50 universe
+        so the dashboard still shows real live prices (not demo data).
+        """
+        if self.available_tickers:
+            stems = sorted(self.available_tickers)
+        else:
+            from data_pipeline.nifty50 import get_all_tickers
+            stems = [self._to_stem(sym) for sym in get_all_tickers()]
+        return {self._to_yf_symbol(stem): stem for stem in stems}
+
+    def _fetch_live_prices(self) -> Dict[str, Dict[str, float]]:
+        """
+        Return cached live prices, refreshing in the background when stale.
+
+        - Fresh cache  → return immediately.
+        - Stale cache  → kick off a background refresh, return the stale cache now
+                         (so the request never waits on a slow yfinance call).
+        - Empty cache  → do a one-time blocking fetch (startup / first request).
+        """
+        now = time.time()
+        if self._price_cache and (now - self._price_cache_ts) < self._price_cache_ttl:
+            return self._price_cache
+
+        if self._price_cache:
+            self._refresh_prices_async()
+            return self._price_cache
+
+        # Cold cache — block once so the first caller gets real data
+        self._refresh_prices()
+        return self._price_cache
+
+    def _refresh_prices_async(self) -> None:
+        """Start a background price refresh unless one is already running."""
+        with self._price_lock:
+            if self._price_refreshing:
+                return
+            self._price_refreshing = True
+        threading.Thread(target=self._refresh_prices, daemon=True).start()
+
+    def _refresh_prices(self) -> None:
+        """Download fresh prices and update the cache (safe to call from a thread)."""
+        try:
+            prices = self._download_live_prices()
+            if prices:
+                self._price_cache = prices
+                self._price_cache_ts = time.time()
+        finally:
+            self._price_refreshing = False
+
+    def _download_live_prices(self) -> Dict[str, Dict[str, float]]:
+        """Batch-download latest price + 1-day % change from yfinance. Never raises."""
+        symbol_map = self._price_universe()
+        if not symbol_map:
+            return {}
+
+        try:
+            import yfinance as yf
+            raw = yf.download(
+                tickers=list(symbol_map.keys()),
+                period="5d",
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+                group_by="ticker",
+                threads=True,
+            )
+        except Exception as e:
+            logger.warning(f"Live price fetch failed: {e} — using stored close")
+            return {}
+
+        prices: Dict[str, Dict[str, float]] = {}
+        single = len(symbol_map) == 1
+        for sym, stem in symbol_map.items():
+            try:
+                sub = raw if single else raw[sym]
+                if "Close" in sub.columns:
+                    closes = sub["Close"].dropna()
+                else:
+                    closes = sub.iloc[:, 0].dropna()
+                if len(closes) == 0:
+                    continue
+                current = float(closes.iloc[-1])
+                prev = float(closes.iloc[-2]) if len(closes) >= 2 else current
+                pct = ((current - prev) / prev * 100) if prev else 0.0
+                prices[stem] = {"price": round(current, 2), "pct_change": round(pct, 2)}
+            except Exception:
+                continue
+        return prices
+
     # ── Explain ────────────────────────────────────────────────────────────────
 
     def explain(self, ticker: str, horizon: str, top_n: int = 15) -> Dict:
         """
-        Compute SHAP feature importances for the latest prediction.
+        Real SHAP feature attributions for the latest prediction.
 
-        Uses the LightGBM model (SHAP is fastest on tree models).
-        Falls back to feature importance if SHAP fails.
+        Uses the tree model's NATIVE TreeSHAP — LightGBM `pred_contrib=True` and
+        XGBoost `pred_contribs=True` — which return exact per-feature SHAP
+        contributions *with sign*, without the heavy `shap`/`numba` stack (so it
+        works on Python 3.14). A positive contribution pushes the prediction
+        toward UP, negative toward DOWN. Falls back to gain importance only if the
+        native computation fails.
         """
-        lgb_bundle = self._models.get(ticker, {}).get(horizon, {}).get("lightgbm_clf")
-        if lgb_bundle is None:
-            lgb_bundle = self._models.get(ticker, {}).get(horizon, {}).get("lightgbm")
-
-        if lgb_bundle is None:
-            raise ValueError(f"No LightGBM model for {ticker}/{horizon}")
+        # Prefer the classifier (direction is what users care about), else regressor
+        bundle = (self._models.get(ticker, {}).get(horizon, {}).get("lightgbm_clf")
+                  or self._models.get(ticker, {}).get(horizon, {}).get("lightgbm")
+                  or self._models.get(ticker, {}).get(horizon, {}).get("xgboost_clf")
+                  or self._models.get(ticker, {}).get(horizon, {}).get("xgboost"))
+        if bundle is None:
+            raise ValueError(f"No tree model for {ticker}/{horizon}")
 
         feature_df    = self._features[ticker]
-        meta          = lgb_bundle.get("meta", {})
+        meta          = bundle.get("meta", {})
         feature_names = meta.get("feature_names", list(feature_df.columns))
-        avail         = [f for f in feature_names if f in feature_df.columns]
-        X_latest      = feature_df[avail].iloc[-1:].values.astype(np.float32)
-        X_latest      = np.nan_to_num(X_latest, nan=0.0, posinf=0.0, neginf=0.0)
+        X_latest      = self._align_features(feature_df.iloc[-1:], feature_names)
+        mtype         = bundle.get("type", "")
 
         try:
-            import shap
-            explainer  = shap.TreeExplainer(lgb_bundle["model"])
-            shap_vals  = explainer.shap_values(X_latest)
+            model = bundle["model"]
+            if mtype.startswith("lgbm"):
+                # LightGBM TreeSHAP → shape (n, n_features + 1); last col = base value
+                contribs = np.asarray(model.predict(X_latest, pred_contrib=True))
+            else:
+                import xgboost as xgb
+                dmatrix  = xgb.DMatrix(pd.DataFrame(X_latest, columns=feature_names))
+                contribs = np.asarray(model.predict(dmatrix, pred_contribs=True))
 
-            # For binary classifier, shap_values is a list [class0, class1]
-            if isinstance(shap_vals, list):
-                shap_vals = shap_vals[1]  # class 1 = UP direction
+            shap_arr = contribs[0, :len(feature_names)]     # drop base/bias column
 
-            shap_arr  = shap_vals[0]
-            feat_imp  = list(zip(avail, shap_arr))
-            feat_imp  = sorted(feat_imp, key=lambda x: abs(x[1]), reverse=True)[:top_n]
-
+            feat_imp = sorted(zip(feature_names, shap_arr),
+                              key=lambda x: abs(x[1]), reverse=True)[:top_n]
             net_direction = float(np.sum(shap_arr))
 
             return {
@@ -479,13 +812,9 @@ class ModelRegistry:
                 "net_direction": net_direction,
             }
 
-        except ImportError:
-            logger.warning("SHAP not installed — falling back to feature importance")
-            return self._fallback_importance(lgb_bundle, avail, top_n)
-
         except Exception as e:
-            logger.warning(f"SHAP failed: {e} — using fallback")
-            return self._fallback_importance(lgb_bundle, avail, top_n)
+            logger.warning(f"Native SHAP failed: {e} — using gain-importance fallback")
+            return self._fallback_importance(bundle, feature_names, top_n)
 
     def _fallback_importance(self, model_bundle: Dict, feature_names: List[str], top_n: int) -> Dict:
         """Use LightGBM built-in importance when SHAP fails."""
@@ -519,35 +848,54 @@ class ModelRegistry:
 
         df = load_features(ticker)
         _, _, test_df = get_train_test_split(df, horizon=horizon)
-        X_test, y_test, _ = prepare_arrays(test_df, horizon)
+        _, y_test, _ = prepare_arrays(test_df, horizon)
 
         # Use best available model for backtest
         model_bundle = None
+        model_name   = None
         for m_name in ["ensemble_clf", "lightgbm_clf", "xgboost_clf", "lightgbm"]:
             bundle = self._models.get(ticker, {}).get(horizon, {}).get(m_name)
             if bundle is not None:
                 model_bundle = bundle
+                model_name   = m_name
                 break
 
         if model_bundle is None:
             raise ValueError(f"No model for backtest: {ticker}/{horizon}")
 
-        # Get predictions for the test set
+        # Predict over the test rows, each model aligned to its own feature set.
+        # IMPORTANT: classifier output is a probability (0..1). The backtest
+        # strategy treats `y_pred > 0` as a long signal, so classifier
+        # probabilities must be centered (prob - 0.5) → >0 means "model says UP".
+        # Regression models already output signed returns and are used as-is.
         model_type = model_bundle.get("type", "")
-        meta       = model_bundle.get("meta", {})
-        feat_names = meta.get("feature_names", [])
 
-        # Re-align features
-        feature_df = self._features[ticker]
-        avail      = [f for f in feat_names if f in feature_df.columns]
-        X_test_aligned = test_df[[f for f in avail if f in test_df.columns]].values.astype(np.float32)
-        X_test_aligned = np.nan_to_num(X_test_aligned, nan=0.0, posinf=0.0, neginf=0.0)
+        if model_name == "ensemble_clf":
+            proba = self._predict_ensemble_proba(ticker, horizon, test_df)
+            if proba is None:  # fall back to a member classifier
+                proba = self._predict_member_proba(ticker, horizon, "lightgbm_clf", test_df)
+            if proba is None:
+                raise ValueError(f"Ensemble backtest produced no predictions: {ticker}/{horizon}")
+            y_pred = proba - 0.5
+        elif model_name in ("lightgbm_clf", "xgboost_clf"):
+            proba = self._predict_member_proba(ticker, horizon, model_name, test_df)
+            if proba is None:
+                raise ValueError(f"Classifier backtest produced no predictions: {ticker}/{horizon}")
+            y_pred = proba - 0.5
+        else:
+            # Regression model — signed expected returns
+            meta       = model_bundle.get("meta", {})
+            feat_names = meta.get("feature_names", list(self._features[ticker].columns))
+            X_test_aligned = self._align_features(test_df, feat_names)
+            if model_type == "lgbm":
+                y_pred = np.asarray(model_bundle["model"].predict(X_test_aligned), dtype=float)
+            else:
+                import xgboost as xgb
+                dmatrix = xgb.DMatrix(pd.DataFrame(X_test_aligned, columns=feat_names))
+                y_pred = np.asarray(model_bundle["model"].predict(dmatrix), dtype=float)
 
-        if len(X_test_aligned) == 0:
-            X_test_aligned = X_test
-
-        y_pred = np.array([self._run_model_predict(model_bundle, X_test_aligned[i:i+1], model_type, avail)
-                           for i in range(len(X_test_aligned))])
+        # GARCH forward-vol per test row enables volatility-targeted sizing
+        vol = test_df["garch_vol"].values if "garch_vol" in test_df.columns else None
 
         horizon_days = {"1d": 1, "5d": 5, "20d": 20}.get(horizon, 1)
         metrics = run_backtest(
@@ -556,6 +904,7 @@ class ModelRegistry:
             dates            = test_df.index,
             transaction_cost = transaction_cost,
             horizon_days     = horizon_days,
+            volatility       = vol,
         )
 
         return {"metrics": metrics}
@@ -602,6 +951,35 @@ class ModelRegistry:
                 f.write(f"regime error: {e}\n{traceback.format_exc()}\n")
             return {"regime": "bull", "since": "2024-01-01", "duration_days": 120}
 
+    # ── Cross-sectional long/short signals ──────────────────────────────────────
+
+    def cross_sectional_signals(self, horizon: str = "5d") -> Dict:
+        """
+        Live market-neutral long/short board from the cross-sectional model
+        (rank + meta-labeling). Cached for an hour; enriched with name/sector/price.
+        """
+        cached = self._signals_cache.get(horizon)
+        if cached and (time.time() - cached[0]) < 3600:
+            return cached[1]
+
+        from training.cross_sectional import generate_signals, load_production
+        prod = load_production(horizon)
+        if prod is None:
+            raise ValueError(f"No cross-sectional model trained for {horizon}")
+
+        sig = generate_signals(horizon, prod=prod)
+
+        live = self._fetch_live_prices()
+        for s in sig["longs"] + sig["shorts"]:
+            meta = self.get_stock_meta(s["ticker"])
+            s["company_name"] = meta.get("name")
+            s["sector"] = meta.get("sector")
+            px = live.get(s["ticker"])
+            s["price"] = float(px["price"]) if px else self._get_current_price(s["ticker"])
+
+        self._signals_cache[horizon] = (time.time(), sig)
+        return sig
+
     # ── Meta Helpers ───────────────────────────────────────────────────────────
 
     def get_stock_meta(self, ticker: str) -> Dict:
@@ -631,20 +1009,29 @@ class ModelRegistry:
         return accuracy
 
     def get_all_prices(self) -> Dict[str, Dict[str, float]]:
-        """Return the latest price and pct_change for all loaded tickers."""
-        prices = {}
+        """
+        Return the latest market price and 1-day pct_change for all loaded
+        tickers. Uses live yfinance quotes (cached), falling back to the stored
+        feature close for any ticker the live fetch couldn't cover.
+        """
+        live = self._fetch_live_prices()
+        prices = dict(live)  # start from live quotes
+
+        # Fill any gaps (tickers missing from the live fetch) with stored close
         for ticker, df in self._features.items():
+            if ticker in prices:
+                continue
             try:
                 if "close" in df.columns and len(df) >= 2:
                     current_price = float(df["close"].iloc[-1])
                     prev_price = float(df["close"].iloc[-2])
-                    
+
                     # Prevent division by zero
                     if prev_price != 0:
                         pct_change = ((current_price - prev_price) / prev_price) * 100
                     else:
                         pct_change = 0.0
-                        
+
                     prices[ticker] = {
                         "price": round(current_price, 2),
                         "pct_change": round(pct_change, 2)

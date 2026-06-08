@@ -47,6 +47,9 @@ def run_backtest(
     transaction_cost: float = 0.001,   # 0.1% per trade (realistic for India)
     horizon_days: int = 1,
     initial_capital: float = 100_000,  # Rs 1 lakh starting capital
+    volatility: Optional[np.ndarray] = None,
+    target_annual_vol: float = 0.20,
+    max_leverage: float = 1.0,
 ) -> Dict:
     """
     Simulate a long/short trading strategy using model predictions.
@@ -57,13 +60,24 @@ def run_backtest(
       - Transaction cost deducted on every position change
       - Position held for horizon_days then re-evaluated
 
+    VOLATILITY TARGETING (when `volatility` is provided):
+      Instead of a fixed full-size long, scale exposure to a constant risk
+      budget: size = clip(target_annual_vol / forecast_vol, 0, max_leverage).
+      You hold less when GARCH says the stock is turbulent and more when it's
+      calm — this typically lifts Sharpe and cuts drawdown even when hit-rate
+      is unchanged. `volatility` is the per-row annualized vol forecast.
+
     Args:
         y_true           : actual returns (ground truth)
-        y_pred           : model's predicted returns
+        y_pred           : model's predicted returns (or centered probabilities)
         dates            : DatetimeIndex for the test period
         transaction_cost : cost per trade as fraction (0.001 = 0.1%)
         horizon_days     : holding period
         initial_capital  : starting portfolio value
+        volatility       : per-row annualized vol forecast (e.g. GARCH); enables
+                           volatility targeting when supplied
+        target_annual_vol: risk budget for vol targeting (annualized)
+        max_leverage     : cap on position size when vol-targeting
 
     Returns:
         dict with all backtest metrics and equity curve
@@ -72,12 +86,23 @@ def run_backtest(
     assert len(y_pred) == n, "y_true and y_pred must have same length"
 
     # ── Strategy Logic ────────────────────────────────────────────────────────
-    # Signal: 1 = long, 0 = cash
-    # We go long when model predicts positive return
-    positions = (y_pred > 0).astype(float)
+    # Discrete signal: 1 = long, 0 = cash. We go long when the model is bullish.
+    raw_signal = (y_pred > 0).astype(float)
 
-    # Portfolio returns: position * actual return - transaction cost on changes
+    if volatility is not None:
+        # Volatility targeting: scale the long position by the risk budget.
+        ann_vol = np.asarray(volatility, dtype=float)
+        finite = np.isfinite(ann_vol) & (ann_vol > 0)
+        fallback = float(np.median(ann_vol[finite])) if finite.any() else target_annual_vol
+        ann_vol = np.where(finite, ann_vol, fallback)
+        size = np.clip(target_annual_vol / ann_vol, 0.0, max_leverage)
+        positions = raw_signal * size
+    else:
+        positions = raw_signal
+
+    # Turnover (drives transaction cost) vs discrete signal flips (trade count)
     position_changes = np.abs(np.diff(positions, prepend=0))
+    signal_changes   = np.abs(np.diff(raw_signal, prepend=0))
     strategy_returns = positions * y_true - position_changes * transaction_cost
 
     # Equity curve: cumulative portfolio value
@@ -94,8 +119,8 @@ def run_backtest(
     correct_direction = np.sign(y_pred) == np.sign(y_true)
     metrics["hit_rate"] = float(np.mean(correct_direction))
 
-    # Only count trades where we actually had a position
-    long_mask = positions == 1
+    # Hit rate on the days we were actually long (discrete signal)
+    long_mask = raw_signal == 1
     if long_mask.sum() > 0:
         metrics["hit_rate_long"] = float(np.mean(correct_direction[long_mask]))
     else:
@@ -153,8 +178,9 @@ def run_backtest(
         metrics["win_loss_ratio"] = float("nan")
 
     # Trade statistics
-    metrics["n_trades"]       = int(position_changes.sum())
-    metrics["pct_long"]       = round(float(np.mean(positions)), 3)
+    metrics["n_trades"]       = int(signal_changes.sum())          # discrete entries/exits
+    metrics["pct_long"]       = round(float(np.mean(raw_signal)), 3)
+    metrics["avg_exposure"]   = round(float(np.mean(positions)), 3)  # avg position size
     metrics["n_samples"]      = n
 
     # Store equity curves for plotting

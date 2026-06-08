@@ -117,6 +117,11 @@ const Analysis = () => {
     () => api.history(apiTicker, range),
     [apiTicker, range],
   );
+  const { data: sim, loading: sLoading } = useApi(
+    () => api.simulate({ ticker: apiTicker, horizon }),
+    [apiTicker, horizon],
+    { enabled: tab === 'risk' },
+  );
 
   const watched = isWatched(display);
   const sectorColor = SECTOR_COLOR[meta?.sector] || '#94A3B8';
@@ -294,6 +299,7 @@ const Analysis = () => {
           tabs={[
             { value: 'thesis',  label: 'Forecast Thesis', icon: IconWaveform },
             { value: 'drivers', label: 'Key Drivers',     icon: IconBrain },
+            { value: 'risk',    label: 'Risk · Monte Carlo', icon: IconTarget },
             { value: 'price',   label: 'Price History',   icon: IconTarget },
           ]}
         />
@@ -445,6 +451,72 @@ const Analysis = () => {
           </>
         )}
 
+        {tab === 'risk' && (
+          <>
+            <Card className="lg:col-span-2">
+              <CardHeader
+                eyebrow="Merton Jump-Diffusion · Monte Carlo"
+                title={`Simulated price cone · ${horizonLabel(horizon)}`}
+                subtitle={sim
+                  ? `${(sim.n_sims || 0).toLocaleString()} paths · ${sim.n_jumps_history ?? 0} historical jumps calibrated · centered on the model forecast`
+                  : 'Thousands of jump-diffusion paths around the model forecast'}
+              />
+              <CardBody className="pt-2">
+                {sLoading || !sim?.fan ? <Skeleton className="h-[300px] w-full" /> : (
+                  <FanChart fan={sim.fan} S0={sim.current_price} />
+                )}
+                {sim && (
+                  <div className="flex items-center gap-4 text-2xs mt-3 px-1 flex-wrap">
+                    <span className="inline-flex items-center gap-1.5"><span className="w-3 h-2 rounded-sm bg-alpha/15 border border-alpha/30" /><span className="text-ink-3">90% range (p5–p95)</span></span>
+                    <span className="inline-flex items-center gap-1.5"><span className="w-3 h-2 rounded-sm bg-alpha/30" /><span className="text-ink-3">Interquartile (p25–p75)</span></span>
+                    <span className="inline-flex items-center gap-1.5"><span className="w-3 h-0.5 rounded bg-alpha" /><span className="text-ink-3">Median path</span></span>
+                  </div>
+                )}
+              </CardBody>
+            </Card>
+
+            <Card>
+              <CardHeader eyebrow="Tail Risk" title="Downside metrics" subtitle="From the simulated distribution" />
+              <CardBody>
+                {sLoading || !sim?.metrics ? (
+                  <div className="space-y-2">{Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-12 w-full" />)}</div>
+                ) : (
+                  <div className="space-y-3">
+                    <RiskRow
+                      label="95% Value-at-Risk"
+                      help="The 5% worst-case loss over the horizon — you'd lose at least this much 1 day in 20."
+                      value={`-${((sim.metrics.var_95 || 0) * 100).toFixed(1)}%`}
+                      tone="bear"
+                    />
+                    <RiskRow
+                      label="Expected Shortfall (CVaR)"
+                      help="Average loss in that worst 5% of outcomes — captures crash/jump severity."
+                      value={`-${((sim.metrics.cvar_95 || 0) * 100).toFixed(1)}%`}
+                      tone="bear"
+                    />
+                    <RiskRow
+                      label="Probability of Gain"
+                      help="Share of simulated paths ending above today's price."
+                      value={`${((sim.metrics.prob_up || 0) * 100).toFixed(0)}%`}
+                      tone={(sim.metrics.prob_up || 0) >= 0.5 ? 'bull' : 'bear'}
+                    />
+                    <RiskRow
+                      label="90% Return Range"
+                      help="5th to 95th percentile of simulated horizon returns (fat-tailed, jump-aware)."
+                      value={`${((sim.metrics.p05 || 0) * 100).toFixed(1)}% … +${((sim.metrics.p95 || 0) * 100).toFixed(1)}%`}
+                      tone="neutral"
+                    />
+                  </div>
+                )}
+                <div className="hairline my-4" />
+                <p className="text-2xs text-ink-4 leading-relaxed">
+                  {sim?.summary || 'Simulates continuous (GARCH) volatility plus sudden jumps calibrated from history, so the range reflects real gap/crash risk — not a thin Gaussian band.'}
+                </p>
+              </CardBody>
+            </Card>
+          </>
+        )}
+
         {tab === 'price' && (
           <Card className="lg:col-span-3">
             <CardHeader
@@ -580,5 +652,67 @@ const RechartForecast = ({ data, color, target, baseline }) => (
     </ComposedChart>
   </ResponsiveContainer>
 );
+
+// ── Monte-Carlo fan chart: p5–p95 + IQR bands with a median path ─────────────
+const FanChart = ({ fan, S0 }) => {
+  const data = useMemo(() => {
+    const { steps = [], p05 = [], p25 = [], p50 = [], p75 = [], p95 = [] } = fan || {};
+    return steps.map((s, i) => ({
+      step: s === 0 ? 'now' : `+${s}d`,
+      band: [p05[i], p95[i]],
+      inner: [p25[i], p75[i]],
+      p50: p50[i],
+    }));
+  }, [fan]);
+
+  const fmtMoney = (x) => `₹${x?.toLocaleString?.('en-IN', { maximumFractionDigits: 0 })}`;
+
+  return (
+    <ResponsiveContainer width="100%" height={300}>
+      <ComposedChart data={data} margin={{ top: 12, right: 12, bottom: 4, left: 0 }}>
+        <XAxis
+          dataKey="step" tickLine={false} axisLine={false} minTickGap={24}
+          tick={{ fontSize: 11, fill: '#64748B' }}
+        />
+        <YAxis
+          tickLine={false} axisLine={false} width={56}
+          tick={{ fontSize: 11, fill: '#64748B' }}
+          domain={['dataMin', 'dataMax']}
+          tickFormatter={(v) => v?.toLocaleString?.('en-IN', { maximumFractionDigits: 0 })}
+        />
+        {Number.isFinite(S0) && (
+          <ReferenceLine y={S0} stroke="#384358" strokeDasharray="3 3"
+            label={{ value: 'Now', fill: '#94A3B8', fontSize: 10, position: 'insideTopLeft' }} />
+        )}
+        <RTooltip
+          cursor={{ stroke: '#384358', strokeWidth: 1, strokeDasharray: '3 3' }}
+          contentStyle={{ background: '#171B25', border: '1px solid #262E40', borderRadius: 10 }}
+          labelStyle={{ color: '#94A3B8', fontSize: 11 }}
+          formatter={(v, name) => {
+            const labels = { band: '90% range', inner: 'IQR (p25–p75)', p50: 'Median' };
+            const txt = Array.isArray(v) ? `${fmtMoney(v[0])} – ${fmtMoney(v[1])}` : fmtMoney(v);
+            return [txt, labels[name] || name];
+          }}
+        />
+        <Area type="monotone" dataKey="band"  stroke="none" fill="#F4C45D" fillOpacity={0.12} isAnimationActive animationDuration={500} />
+        <Area type="monotone" dataKey="inner" stroke="none" fill="#F4C45D" fillOpacity={0.22} isAnimationActive animationDuration={500} />
+        <Line type="monotone" dataKey="p50" stroke="#F4C45D" strokeWidth={2} dot={false} isAnimationActive animationDuration={500} />
+      </ComposedChart>
+    </ResponsiveContainer>
+  );
+};
+
+const RiskRow = ({ label, value, help, tone = 'neutral' }) => {
+  const color = tone === 'bear' ? 'text-bear' : tone === 'bull' ? 'text-bull' : 'text-ink-1';
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0">
+        <div className="text-xs font-medium text-ink-2">{label}</div>
+        <div className="text-2xs text-ink-5 leading-snug mt-0.5">{help}</div>
+      </div>
+      <div className={cn('font-display font-bold text-md tabular shrink-0', color)}>{value}</div>
+    </div>
+  );
+};
 
 export default Analysis;
