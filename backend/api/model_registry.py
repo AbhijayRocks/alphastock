@@ -284,11 +284,24 @@ class ModelRegistry:
             return None
 
     def _load_latest_features(self) -> None:
-        """Load the last row of features for each stock for live prediction."""
+        """
+        Load a recent tail of features per stock into memory for live prediction.
+
+        Only the most recent `_FEATURE_ROWS` rows are kept resident — enough for
+        live predict/explain, GARCH/Merton calibration, and the default history
+        window — which keeps the registry inside Render's 512 MB free tier (the
+        full panels are ~360 MB). Backtest and the cross-sectional panel read the
+        full parquet from disk on demand (features.pipeline.load_features /
+        load_all_features), so they are unaffected by this RAM cap. Override the
+        window with ALPHASTOCK_FEATURE_ROWS (0 = load full history).
+        """
+        import os
         pipeline_dir = FEATURES_DIR / "pipeline"
         if not pipeline_dir.exists():
             logger.warning("Pipeline features directory not found")
             return
+
+        rows = int(os.getenv("ALPHASTOCK_FEATURE_ROWS", "750"))
 
         loaded = 0
         for ticker in self.available_tickers:
@@ -298,6 +311,8 @@ class ModelRegistry:
             try:
                 df = pd.read_parquet(path, engine="pyarrow")
                 df.index = pd.to_datetime(df.index)
+                if rows > 0:
+                    df = df.tail(rows)
                 # Drop target columns — we only want features
                 feature_cols = [c for c in df.columns if not c.startswith("target_")]
                 self._features[ticker] = df[feature_cols]
@@ -305,7 +320,7 @@ class ModelRegistry:
             except Exception as e:
                 logger.warning(f"Feature load failed for {ticker}: {e}")
 
-        logger.info(f"Loaded features for {loaded} stocks")
+        logger.info(f"Loaded features for {loaded} stocks (last {rows or 'all'} rows each)")
 
     def reload_live_data(self) -> int:
         """

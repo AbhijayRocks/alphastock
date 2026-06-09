@@ -56,6 +56,15 @@ async def lifespan(app: FastAPI):
     init_db()
     logger.info("Auth database ready")
 
+    # Pull model + feature artifacts from the Hugging Face Hub if they aren't on
+    # disk (the case on a fresh clone-based deploy like Render — they're git-
+    # ignored). Local dev with already-built artifacts is a no-op. Never raises.
+    try:
+        from data_pipeline.hf_sync import ensure_artifacts
+        ensure_artifacts()
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Artifact sync skipped: {e}")
+
     try:
         registry = ModelRegistry()
         registry.load_all()
