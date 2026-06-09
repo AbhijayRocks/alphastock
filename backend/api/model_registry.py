@@ -188,15 +188,21 @@ class ModelRegistry:
         # is served instantly with real market data (works even with 0 models).
         self._refresh_prices_async()
 
-        # Warm the cross-sectional signal board too (panel build ~20s) so the first
-        # /signals request doesn't block. Best-effort; ignored if no model trained.
-        def _warm_signals():
-            for hz in ("5d", "1d", "20d"):
-                try:
-                    self.cross_sectional_signals(hz)
-                except Exception:
-                    pass
-        threading.Thread(target=_warm_signals, daemon=True).start()
+        # Optionally warm the cross-sectional signal board (panel build ~20s) so
+        # the first /signals request doesn't block. DISABLED BY DEFAULT: warming
+        # loads every stock's full feature panel at once (load_all_features),
+        # which spikes RAM well past Render's 512 MB tier on top of the resident
+        # models and OOM-crash-loops the instance right after "service is live".
+        # Enable only on a larger instance with ALPHASTOCK_WARM_SIGNALS=1.
+        import os
+        if os.getenv("ALPHASTOCK_WARM_SIGNALS", "0").lower() in ("1", "true", "yes", "on"):
+            def _warm_signals():
+                for hz in ("5d", "1d", "20d"):
+                    try:
+                        self.cross_sectional_signals(hz)
+                    except Exception:
+                        pass
+            threading.Thread(target=_warm_signals, daemon=True).start()
 
     # ── Model Loaders ──────────────────────────────────────────────────────────
 
