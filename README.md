@@ -223,6 +223,8 @@ Serve `frontend/dist` from any static host (or behind the same origin as the API
 | [`PROJECT_STATE.md`](PROJECT_STATE.md) | Full system state: what's live, architecture, API surface, environment notes |
 | [`QUANT_ROADMAP.md`](QUANT_ROADMAP.md) | Quant research track — trust harness, cross-sectional model results, roadmap |
 | [`SETUP.md`](SETUP.md) | Environment, data ingestion, GPU/CUDA, model training, Postgres |
+| [`DEPLOYMENT.md`](DEPLOYMENT.md) | Production runbook — Hugging Face artifact delivery, Render env, memory notes |
+| [`TODO.md`](TODO.md) | Open items & the pending Render-memory decision |
 
 > **Methodology note:** the platform is built with a "don't fool yourself" discipline — realistic transaction costs, time-series-aware validation, and a **Deflated Sharpe** check that penalizes multiple-testing. During development this harness caught and removed a real look-ahead leak; the published cross-sectional results are leak-free and honestly measured.
 

@@ -4,7 +4,27 @@
 LIVE in the web app, how to run it, environment gotchas, and what's planned.
 Quant research plan lives in `QUANT_ROADMAP.md` (linked at the end).
 
-Last updated: 2026-06-08.
+Last updated: 2026-06-10.
+
+---
+
+## 0. Production deployment status (2026-06-10) — IMPORTANT
+- **Where it runs:** backend on **Render** (`alphastock`, Docker, Free tier),
+  deploys from **`pansariabhijay-source/Stock_Web_App` → main**. URL:
+  `https://alphastock-73lt.onrender.com` (API under `/api`). Frontend on Vercel.
+- **The bug we hit:** artifacts (`backend/artifacts/models`, `…/features`) are
+  git-ignored → never reached Render → all model endpoints fell back to mock;
+  only `/prices` (live yfinance, the ticker) looked real.
+- **Fixed:** artifacts now download from **Hugging Face** on boot
+  (`data_pipeline/hf_sync.py` → `ensure_artifacts()`), pulled from the public repo
+  **`eLeetCoder/alphastock-artifacts`**. Boot reaches `models_loaded: 750`.
+  Also: feature panels trimmed to the last `ALPHASTOCK_FEATURE_ROWS` (750) rows in
+  RAM; startup signal warm-up gated behind `ALPHASTOCK_WARM_SIGNALS` (off) because
+  it OOM-crash-looped the instance. Commits `c42ab62`, `c919ab0`.
+- **🔴 Still blocked:** Render's free **512 MB** has no headroom after the models
+  load — any analytics request OOM-kills the instance (502/503). Boot is stable;
+  serving is not. **Decision pending (2 GB upgrade vs. lazy-load): see
+  [`TODO.md`](TODO.md).** Full runbook: [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ---
 
@@ -99,8 +119,8 @@ PROJECT_STATE.md         (this file)
   lightgbm_clf, xgboost_clf, ensemble_reg, ensemble_clf} → ~750 models.
   - ✅ **All retrained on CLEAN features** (post Ichimoku-leak fix) and loaded —
     all three horizons are leak-free and live.
-- **Cross-sectional model:** `artifacts/models/cross_sectional/` (research, not
-  yet wired to the API).
+- **Cross-sectional model:** `artifacts/models/cross_sectional/` — **live** via
+  `/api/signals` and surfaced in the screener's LONG/SHORT filter.
 - Realistic accuracy: classifiers ~50–57%; cross-sectional IC ~0.036 (real).
 
 ## 6. Implemented & LIVE in the web app
@@ -137,6 +157,28 @@ PROJECT_STATE.md         (this file)
   productionized): top quintile LONG / bottom SHORT, with score, meta confidence,
   name/sector/live price. Model: `artifacts/models/cross_sectional/prod_*_5d`.
   Warmed at startup, cached 1h. (5d trained; 1d/20d optional via `train_production`.)
+### Market Pulse hero (`/api/pulse`, Dashboard)
+- Dashboard hero (replaced the old regime banner): a 0–100 **model-conviction
+  index** (mean classifier P(up) across all 50 names at the horizon) fused with
+  **live market breadth** (advancers/decliners), **leading/lagging sector**, and
+  regime + desk stance. One cached, classifier-only call. `ModelRegistry.market_pulse`.
+### Screener (`/api/screen` + `/api/fundamentals`, Screener page)
+- **Single `/api/screen` call** returns one rich row per stock (model direction/
+  prob/expected-return + technicals + fundamentals + cross-sectional side),
+  replacing 50 per-stock `/predict` round-trips. Cached ~120s. `ModelRegistry.screen`.
+- Filters: fundamentals (P/E, ROE, market cap, D/E, dividend yield), technicals
+  (RSI, vs 50/200-DMA, % from 52w high, 1M return), model/signal (P(up), expected
+  return, cross-sectional LONG/SHORT). Sortable columns; CSV export of everything.
+- **One-click presets** (Value, Quality, Oversold, Breakout, Momentum, Conviction
+  longs) and **per-user saved screens** (`prefs.savedScreens`, persisted via `/user/data`).
+- **Fundamentals** (`/api/fundamentals`) read from the raw snapshot and normalized
+  to display units. ⚠ current-snapshot (look-ahead) — fine live, not for backtests.
+### Search & navigation (frontend UX)
+- **Animated glowing search bar** (`components/ui/animated-glowing-search-bar.jsx`)
+  as the Screener's primary search; iris-themed, controlled/reusable.
+- **Command palette (⌘K)** de-lagged: opaque scrim (no full-screen backdrop-blur),
+  ticker tape paused while open, item list built once; iris focus accent.
+- **Top-bar quick-nav** (`ExpandableTabs`); removed the live/offline badge + regime chip.
 ### Auth (`/api/auth/*`, `/api/user/*`)
 - JWT + SQLite accounts, per-user watchlist/preferences (offline fallback).
 
@@ -145,6 +187,9 @@ PROJECT_STATE.md         (this file)
 `GET /api/history/{ticker}` · `POST /api/predict` · `POST /api/explain` ·
 `POST /api/backtest` · `POST /api/simulate` · `POST /api/optimize_portfolio` ·
 `GET /api/signals?horizon=` (cross-sectional long/short board) ·
+`GET /api/pulse?horizon=` (dashboard conviction + breadth) ·
+`GET /api/screen?horizon=` (full screener board, one call) ·
+`GET /api/fundamentals` (per-stock P/E, ROE, market cap, …) ·
 `GET /api/news?sector=` · `GET /api/news/sectors` (free Google-News RSS) ·
 `POST /api/auth/register|login` · `GET/PATCH /api/auth/me` · `GET/PUT /api/user/data`
 
@@ -209,3 +254,13 @@ restart.
 - Ran full data pipeline: ingest → features → train 750 models (3 horizons).
 - Built quant trust harness + cross-sectional model; **caught & fixed the
   Ichimoku leak**; rebuilding/retraining clean.
+- **Automatic daily data refresh** (in-process scheduler + `daily_update.py`);
+  fixed the broken incremental ingest (252-row guard + exclusive `end`). See §2.
+- **Market Pulse** dashboard hero (`/api/pulse`) replacing the regime banner.
+- **Screener overhaul:** single `/api/screen` board (was 50 `/predict` calls),
+  `/api/fundamentals`, fundamental/technical/model filters, presets, per-user
+  saved screens. Fixed a missing `api.screen` client method (table showed
+  "no matches") + added a `mockScreen` offline fallback.
+- **Search/UX:** animated glowing search bar; command-palette typing lag fixed
+  (opaque scrim, paused ticker tape, item list built once); top-bar quick-nav;
+  removed live/offline badge + regime chip; sector-heat tile cleanup.

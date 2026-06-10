@@ -3,6 +3,23 @@
 This is the runbook for the production bug where **only the ticker showed real
 prices and everything else was mock data**.
 
+## ⚠️ Current status (2026-06-10) — read this first
+- **Render service:** `alphastock` (Docker, Free), deploys from
+  **`pansariabhijay-source/Stock_Web_App` → `main`** (NOT the AbhijayRocks repo —
+  both have the fix, but Render is wired to this one).
+- **Backend URL:** `https://alphastock-73lt.onrender.com` (API under `/api`).
+- **Artifacts:** uploaded to **`eLeetCoder/alphastock-artifacts`** on Hugging
+  Face, now **PUBLIC** (so no token needed to download).
+- **Root cause FIXED:** artifacts now download from HF on boot; the instance
+  reaches `models_loaded: 750, stocks_available: 50` and boot is stable.
+- **🔴 NOT fully working yet:** Render's free **512 MB tier has no headroom left**
+  after the 750 models load — any analytics request (`/predict`, `/pulse`,
+  `/screen`, `/signals`) OOM-kills the instance (502/503). `/health` and the
+  `/prices` ticker work. **Next decision (2 GB upgrade vs. lazy-load) is in
+  [`TODO.md`](TODO.md).**
+- **Env vars set on Render:** `HF_REPO_ID=eLeetCoder/alphastock-artifacts`,
+  `ALPHASTOCK_DAILY_UPDATE=0`. (`HF_TOKEN` is now optional — repo is public.)
+
 ## Why it happened
 
 The trained models (~97 MB) and feature panels (~360 MB) are **git-ignored**
@@ -54,10 +71,11 @@ Re-run it any time you retrain to publish fresh models.
 ### 3. Configure Render (backend service → Environment)
 | Key | Value |
 |---|---|
-| `HF_REPO_ID` | `YOUR_USERNAME/alphastock-artifacts` |
-| `HF_TOKEN` | `hf_xxxxx` (needed only if the repo is private) |
+| `HF_REPO_ID` | `eLeetCoder/alphastock-artifacts` (public) |
+| `HF_TOKEN` | optional — only needed if the HF repo is private |
 | `ALPHASTOCK_DAILY_UPDATE` | `0` — skip the heavy daily feature rebuild on the 512 MB tier |
 | `ALPHASTOCK_FEATURE_ROWS` | *(optional)* lower than 750 if you still hit OOM |
+| `ALPHASTOCK_WARM_SIGNALS` | leave **unset/0** on 512 MB (warming loads all panels → OOM). Set `1` only on a 2 GB+ instance. |
 
 Then **Manual Deploy → Clear build cache & deploy**. On boot the logs should show
 `Downloading artifacts from Hugging Face repo ...` then
